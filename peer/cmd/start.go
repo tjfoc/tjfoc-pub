@@ -26,6 +26,7 @@ import (
 	"github.com/tjfoc/tjfoc/core/chaincode"
 	"github.com/tjfoc/tjfoc/core/common/flogging"
 	"github.com/tjfoc/tjfoc/core/consensus/raft"
+	"github.com/tjfoc/tjfoc/core/health"
 	"github.com/tjfoc/tjfoc/core/miscellaneous"
 	"github.com/tjfoc/tjfoc/core/store/chain"
 	"github.com/tjfoc/tjfoc/core/worldstate"
@@ -35,7 +36,8 @@ import (
 // startCmd represents the start command
 var startCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start Peer",
+	Short: "Peer start",
+	Long:  "Get peer's membership from database",
 	Run: func(cmd *cobra.Command, args []string) {
 		start()
 	},
@@ -50,6 +52,7 @@ var logger = flogging.MustGetLogger("start")
 func start() {
 	logInit()
 	p := new(peer)
+	p.peerid = []byte(Config.Self.Id)
 	p.memberList = make(map[string]*chain.PeerInfo)
 	if c, err := newCryptPlug(); err != nil {
 		logger.Fatal(err)
@@ -69,32 +72,22 @@ func start() {
 	if err != nil {
 		logger.Fatal(err)
 	}
+	health.GetInstance()
+	worldstate.New(uint64(17), "worldstate.db", sp)
+	chaincode.GetDelieverInstance()
+	chaincode.GetResultInstance().SetAttribute(Config.Self.Id, p.cryptPlug)
 
-	worldstate.New(uint64(17), Config.StorePath.WorldStatePath, sp)
-	chaincode.GetInstance()
-
-	// switch cmd.Config.Typ {
-	// case "join":
-	// 	p.consensusAPI = raft.NewRaft(raft.Join, p, p.blockChain, sp, packCallback, cmd.Config)
-	// case "start":
 	p.consensusAPI = raft.NewRaft(raft.Start, p, p.blockChain, sp, packCallback, Config)
-	// case "observer":
-	// 	p.consensusAPI = raft.NewRaft(raft.Observer, p, p.blockChain, sp, packCallback, cmd.Config)
-	// default:
-	// 	p.consensusAPI = raft.NewRaft(raft.Normal, p, p.blockChain, sp, packCallback, cmd.Config)
-	// }
-	// p.consensusAPI = raft.NewRaft(raft.Normal, p, p.blockChain, sp, packCallback, Config)
-	p.p2pServer = p2p.New(sp, time.Duration(Config.Members.P2P.Cycle)*time.Millisecond, p.consensusAPI, p.blockChain)
-
+	p.p2pServer = p2p.New(sp, time.Duration(Config.P2P.Cycle)*time.Millisecond, p.consensusAPI, p.blockChain)
 	for k, v := range p.memberList {
 		id, _ := miscellaneous.GenHash(md5.New(), []byte(k))
 		if addr, err := net.ResolveTCPAddr("tcp", v.Addr); err != nil {
 			logger.Fatal(err)
 		} else {
 			p.p2pServer.RegisterPeer(id, addr)
+			logger.Infof("p2p registerPeer [name:%s, addr:%s]", k, v.Addr)
 		}
 	}
-
 	//CA
 	//ls
 	//	err := ca.CertLocalVerify()

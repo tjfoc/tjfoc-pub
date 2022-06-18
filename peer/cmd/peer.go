@@ -22,11 +22,11 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strconv"
 	"strings"
 
 	base58 "github.com/jbenet/go-base58"
 	"github.com/tjfoc/gmsm/sm2"
+	"github.com/tjfoc/tjfoc/core/health"
 	"github.com/tjfoc/tjfoc/core/miscellaneous"
 	"github.com/tjfoc/tjfoc/core/transaction"
 	"github.com/tjfoc/tjfoc/core/worldstate"
@@ -36,7 +36,23 @@ import (
 	"golang.org/x/net/context"
 )
 
+func (p *peer) isAccpet() bool {
+	// if time.Now().Sub(p.t).Seconds() < 0.1 {
+	// 	p.conNum++
+	// 	if p.conNum > 100 {
+	// 		return false
+	// 	}
+	// } else {
+	// 	p.t = time.Now()
+	// 	p.conNum = 0
+	// }
+	return true
+}
+
 func (p *peer) Search(ctx context.Context, in *ppr.SearchMes) (*ppr.SearchRes, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	tempres := make(map[string]string, 0)
 	switch in.Type {
 	//单key查询
@@ -48,6 +64,7 @@ func (p *peer) Search(ctx context.Context, in *ppr.SearchMes) (*ppr.SearchRes, e
 			}
 		}
 	//多key查询
+
 	case 1:
 		{
 			tempkey := make([]string, 0)
@@ -76,21 +93,37 @@ func (p *peer) Search(ctx context.Context, in *ppr.SearchMes) (*ppr.SearchRes, e
 }
 
 func (p *peer) NewTransaction(ctx context.Context, in *ptx.Transaction) (*ppr.BlockchainBool, error) {
-	// if cmd.Config.Crypt.TxVerify {
-	// 	if len(in.Header.BigNum) != 64 {
-	// 		return nil, errors.New("error big num!")
-	// 	}
-	// 	x := in.Header.BigNum[0:32]
-	// 	y := in.Header.BigNum[32:]
-	// 	n1 := big.NewInt(0)
-	// 	n2 := big.NewInt(0)
-	// 	ok := verify.Verify(n1.SetBytes(x), n2.SetBytes(y), in.Header.TransactionHash, in.Header.TransactionSign)
-	// 	if !ok {
-	// 		return nil, errors.New("failed to verify signature!")
-	// 	}
+	//内存空间不足
+	// if !sysenv.CheckMinMemory() {
+	// 	logger.Warningf("out of memory cache.MemTotal:%d, MemAvailable:%d", sysenv.MemTotal, sysenv.MemAvailable)
+	// 	return &ppr.BlockchainBool{
+	// 		Ok:  false,
+	// 		Err: fmt.Sprintf("out of memory cache"),
+	// 	}, errors.New("out of memory cache")
 	// }
-	tx := transaction.New(in.SmartContract, in.SmartContractArgs, in.Header.Version, in.Header.Timestamp)
+	if !p.isAccpet() {
+		return &ppr.BlockchainBool{
+			Ok:  false,
+			Err: fmt.Sprintf("too many connections"),
+		}, errors.New("too many connections")
+	}
+
+	//tx := transaction.New(in.SmartContract, in.SmartContractArgs, in.Header.Version, in.Header.Timestamp)
+	tx, err := transaction.New(in.Nodes, in.Deal, in.Header.Privacy, in.Header.Version, in.Header.Timestamp)
+	if err != nil {
+		logger.Errorf("transaction error %v", err)
+		return &ppr.BlockchainBool{
+			Ok:  false,
+			Err: fmt.Sprintf("error:%s", err),
+		}, err
+	}
+
 	if hashData, err := tx.Hash(p.cryptPlug); err != nil || bytes.Compare(hashData, in.Header.TransactionHash) != 0 {
+		if err != nil {
+			logger.Errorf("return false, hash err %s\n", err)
+		} else {
+			logger.Errorf("return false, diff hash, hashData:%x", hashData)
+		}
 		return &ppr.BlockchainBool{
 			Ok:  false,
 			Err: fmt.Sprintf("error:%s", err),
@@ -98,6 +131,7 @@ func (p *peer) NewTransaction(ctx context.Context, in *ptx.Transaction) (*ppr.Bl
 	} else {
 		tx.AddSign(in.Header.TransactionSign)
 	}
+
 	if err := p.blockChain.TransactionAdd(tx); err != nil {
 		return &ppr.BlockchainBool{
 			Ok:  false,
@@ -110,12 +144,18 @@ func (p *peer) NewTransaction(ctx context.Context, in *ptx.Transaction) (*ppr.Bl
 }
 
 func (p *peer) BlockchainGetHeight(ctx context.Context, in *ppr.BlockchainBool) (*ppr.BlockchainNumber, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	return &ppr.BlockchainNumber{
 		Number: p.blockChain.Height(),
 	}, nil
 }
 
 func (p *peer) BlockchainGetBlockByHash(ctx context.Context, in *ppr.BlockchainHash) (*pbc.Block, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	if b := p.blockChain.GetBlockByHash(in.HashData); b == nil {
 		return nil, errors.New("BlockchainGetBlockByHash: failed to find block")
 	} else {
@@ -142,6 +182,9 @@ func (p *peer) BlockchainGetBlockByHash(ctx context.Context, in *ppr.BlockchainH
 }
 
 func (p *peer) BlockchainGetBlockByHeight(ctx context.Context, in *ppr.BlockchainNumber) (*pbc.Block, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	if b := p.blockChain.GetBlockByHeight(in.Number); b == nil {
 		return nil, errors.New("BlockchainGetBlockByHeight: failed to find block")
 	} else if hashData, err := b.Hash(p.cryptPlug); err != nil {
@@ -170,13 +213,16 @@ func (p *peer) BlockchainGetBlockByHeight(ctx context.Context, in *ppr.Blockchai
 }
 
 func (p *peer) BlockchainGetTransaction(ctx context.Context, in *ppr.BlockchainHash) (*ptx.Transaction, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	if tx := p.blockChain.GetTransaction(in.HashData); tx == nil {
 		return nil, errors.New("BlockchainGetTransaction: failed to find transaction")
 	} else {
 		return &ptx.Transaction{
-			Records:           tx.Records(),
-			SmartContract:     tx.SmartContract(),
-			SmartContractArgs: tx.SmartContractArgs(),
+			Records: tx.Records(),
+			//SmartContract:     tx.SmartContract(),
+			//SmartContractArgs: tx.SmartContractArgs(),
 			Header: &ptx.TransactionHeader{
 				TransactionHash: in.HashData,
 				Version:         tx.Version(),
@@ -188,6 +234,9 @@ func (p *peer) BlockchainGetTransaction(ctx context.Context, in *ppr.BlockchainH
 }
 
 func (p *peer) BlockchainGetTransactionIndex(ctx context.Context, in *ppr.BlockchainHash) (*ppr.BlockchainNumber, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	if a, err := p.blockChain.GetTransactionIndex(in.HashData); err != nil {
 		return nil, err
 	} else {
@@ -198,6 +247,9 @@ func (p *peer) BlockchainGetTransactionIndex(ctx context.Context, in *ppr.Blockc
 }
 
 func (p *peer) BlockchainGetTransactionBlock(ctx context.Context, in *ppr.BlockchainHash) (*ppr.BlockchainNumber, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	if a, err := p.blockChain.GetTransactionBlock(in.HashData); err != nil {
 		return nil, err
 	} else {
@@ -208,6 +260,9 @@ func (p *peer) BlockchainGetTransactionBlock(ctx context.Context, in *ppr.Blockc
 }
 
 func (p *peer) GetMemberList(ctx context.Context, in *ppr.BlockchainBool) (*ppr.MemberListInfo, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	mlist := new(ppr.MemberListInfo)
 	mlist.MemberList = []*ppr.PeerInfo{}
 	peers := p.consensusAPI.Peers()
@@ -219,7 +274,6 @@ func (p *peer) GetMemberList(ctx context.Context, in *ppr.BlockchainBool) (*ppr.
 		if v.IsLeader {
 			state = 1
 		}
-		v.Addr = strings.Split(v.Addr, ":")[0] + ":" + strconv.Itoa(Config.Rpc.Port)
 		mlist.MemberList = append(mlist.MemberList, &ppr.PeerInfo{
 			Id:    string(miscellaneous.Dup([]byte(v.ID))),
 			Addr:  string(miscellaneous.Dup([]byte(v.Addr))),
@@ -230,9 +284,12 @@ func (p *peer) GetMemberList(ctx context.Context, in *ppr.BlockchainBool) (*ppr.
 }
 
 func (p *peer) UpdatePeer(ctx context.Context, in *ppr.PeerUpdateInfo) (*ppr.BlockchainBool, error) {
+	if !p.isAccpet() {
+		return nil, errors.New("too many connections")
+	}
 	var adminSign AdminSignature
 
-	if in.Admin != Config.Admin {
+	if in.Admin != Config.Node.Admin {
 		return &ppr.BlockchainBool{
 			Ok:  false,
 			Err: "Permission prohibition",
@@ -249,7 +306,7 @@ func (p *peer) UpdatePeer(ctx context.Context, in *ppr.PeerUpdateInfo) (*ppr.Blo
 		}, nil
 	}
 	switch {
-	case strings.Compare(Config.Crypt.KeyTyp, "sm2") == 0:
+	case strings.Compare(Config.Crypt.PkiTyp, "sm2") == 0:
 		var pubKey sm2.PublicKey
 
 		pubKey.X = new(big.Int)
@@ -264,7 +321,7 @@ func (p *peer) UpdatePeer(ctx context.Context, in *ppr.PeerUpdateInfo) (*ppr.Blo
 				Err: "Permission prohibition",
 			}, nil
 		}
-	case strings.Compare(Config.Crypt.KeyTyp, "ecc") == 0:
+	case strings.Compare(Config.Crypt.CipherTyp, "ecc") == 0:
 		var pubKey ecdsa.PublicKey
 
 		pubKey.X = new(big.Int)
@@ -288,4 +345,7 @@ func (p *peer) UpdatePeer(ctx context.Context, in *ppr.PeerUpdateInfo) (*ppr.Blo
 	return &ppr.BlockchainBool{
 		Ok: ok,
 	}, nil
+}
+func (p *peer) GetPeerHealthData(ctx context.Context, in *ppr.Empty) (*ppr.PeerStatusInfo, error) {
+	return health.GetInstance().GetPeerStatusInfo(), nil
 }

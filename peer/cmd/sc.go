@@ -23,10 +23,48 @@ func tCallBack(usrData interface{}, tx *transaction.Transaction) int {
 	btxsp, _ := usrData.(*blockchain.BlockTxs)
 	btxs := *btxsp
 	p, _ := btxs.UsrData.(*peer)
-	btxs.SmartContract = append(btxs.SmartContract, tx.SmartContract())
-	btxs.SmartContractArgs = append(btxs.SmartContractArgs, tx.SmartContractArgs())
 	hashData, _ := tx.Hash(p.cryptPlug)
+	//logger.Infof("tryToDecryptTx txid %x\n", hashData)
+	smartContract, smartContractArgs, err := tryToDecryptTx(p, tx)
+	if err != nil {
+		logger.Warningf("tryToDecryptTx txid:%x err:%v,", hashData, err)
+		panic(1)
+	}
+	//txData, _ := tx.Show()
+	//logger.Infof("upd tx, txid:%x txLen:%d", hashData, len(txData))
+	btxs.SmartContract = append(btxs.SmartContract, smartContract)
+	btxs.SmartContractArgs = append(btxs.SmartContractArgs, smartContractArgs)
 	btxs.Hashs = append(btxs.Hashs, hashData)
 	*btxsp = btxs
 	return 0
+}
+
+func tryToDecryptTx(p *peer, tx *transaction.Transaction) ([]byte, [][]byte, error) {
+	//logger.Infof("in sc.tryToDecryptTx")
+	//defer logger.Infof("end sc.tryToDecryptTx")
+	smartContract := []byte{}
+	smartContractArgs := [][]byte{}
+	if !tx.IsPrivacy() {
+		//logger.Infof("tx is not privacy")
+		return tx.TryToUnmarshalDeal(tx.GetTransactionDeal())
+	}
+
+	key := tx.GetCipherKey(p.peerid)
+	//logger.Infof("cur %s GetCipherKey Key:%x", p.peerid, key)
+	if key == nil || string(key) == "" {
+		logger.Infof("this peer ignore the transaction,return")
+		return smartContract, smartContractArgs, nil
+	}
+	if k, err := p.cryptPlug.Decrypt(key); err != nil {
+		logger.Warningf("Decrypt Key with privateKey err peer`key:%x  err:%v", key, err)
+		return smartContract, smartContractArgs, err
+	} else {
+		//logger.Infof("decrypt k:%x", k)
+		if plaintext, err := p.cryptPlug.DecryptBlock(k, tx.GetTransactionDeal()); err != nil {
+			logger.Warningf("Cipher Decrypt txdeal [k=%x] err %v", k, err)
+			return smartContract, smartContractArgs, err
+		} else {
+			return tx.TryToUnmarshalDeal(plaintext)
+		}
+	}
 }

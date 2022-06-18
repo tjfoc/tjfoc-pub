@@ -29,7 +29,8 @@ message ChaincodeMessage {
         GET_STATEN = 20;
         DEL_STATEN = 21;
         GET_STATE_BY_PREFIX = 22;
-		CC_PANIC = 23;
+		REQUIRE_CRYPT = 23;
+		REQUIRE_COMPARE = 24;
     }
     Type type = 1;
     bytes payload = 3;

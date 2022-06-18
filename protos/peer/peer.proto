@@ -46,6 +46,21 @@ message SearchRes{
 	map<string,string> res = 1;
 }
 
+message PeerStatusInfo{
+	map<string,double> diskUsedPercent = 1;//磁盘使用量
+	map<string,uint64> diskTotal = 2;//磁盘总量
+	double memUsedPercent = 3;//内存使用量
+	uint64 memTotal = 4;//内存总量
+	repeated double singleCPUUsedPercent = 5;//单个cpu使用量
+	double totalCPUUsedPercent = 6;//总的cpu使用量
+	double wsRateTotal = 7;//worldstate插入数据的总频率
+	double wsRateFromLast = 8;//worldstate插入数据的频率，从上次到此次
+	double wsRateEverySec10 = 9;//worldstate插入数据的频率，每10秒钟
+}
+message Empty{
+
+}
+
 service Peer{
     rpc Search(SearchMes) returns(SearchRes){};
     rpc NewTransaction(transaction.Transaction) returns(BlockchainBool){};
@@ -62,4 +77,6 @@ service Peer{
     rpc GetMemberList(BlockchainBool) returns(MemberListInfo){};
 
     rpc UpdatePeer(PeerUpdateInfo) returns(BlockchainBool){};
+	
+	rpc GetPeerHealthData(Empty)returns(PeerStatusInfo){};
 }

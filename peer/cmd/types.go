@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"math/big"
+	"time"
 
 	"github.com/tjfoc/tjfoc/core/blockchain"
 	"github.com/tjfoc/tjfoc/core/consensus"
@@ -26,6 +27,9 @@ import (
 )
 
 type peer struct {
+	conNum       uint32
+	t            time.Time
+	peerid       []byte
 	cryptPlug    crypt.Crypto
 	grpcServer   *grpc.Server
 	p2pServer    p2p.P2pServer

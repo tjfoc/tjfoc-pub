@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	BLOCK_SIZE = 100 * 1024 // 区块大小限制为10KB
+	BLOCK_SIZE = 1024 * 1024 // 区块大小限制为 100KB
 )
 
 type BcCallBackFunc (func(interface{}, *transaction.Transaction) int)
@@ -42,6 +42,7 @@ type blockChain struct {
 	syncBlocks        *blockQueue
 	packBlocks        *blockQueue
 	lock              sync.Mutex
+	wlock             sync.Mutex
 	usrData           interface{}
 	blockchain        chain.Chain
 	last              *block.Block

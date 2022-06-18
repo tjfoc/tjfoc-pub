@@ -61,26 +61,51 @@ func readPrivateKeyFromPem(fileName string) (*ecdsa.PrivateKey, error) {
 
 func newCryptPlug() (crypt.Crypto, error) {
 	var h hash.Hash
-	var v crypto.Hash
+	var opts crypto.Hash
 	var s crypto.Signer
+	var p crypt.Pki
+	var cip crypt.Cipher
+	var v crypt.Verifyer
 
+	//pki
 	switch {
-	case strings.Compare(Config.Crypt.KeyTyp, "sm2") == 0:
-		s, _ = sm2.ReadPrivateKeyFromPem(Config.Crypt.KeyPath, nil)
-	case strings.Compare(Config.Crypt.KeyTyp, "ecc") == 0:
-		s, _ = readPrivateKeyFromPem(Config.Crypt.KeyPath)
+	case strings.Compare(Config.Crypt.PkiTyp, "sm2") == 0:
+		priv, err := sm2.ReadPrivateKeyFromPem(Config.Crypt.PkiPath, nil)
+		if err != nil {
+			panic(err)
+		}
+		s = priv
+		v = &crypt.Sm2Verify{Pub: &priv.PublicKey}
+		p = &crypt.Sm2Ecc{Priv: priv, Pub: &priv.PublicKey}
+	case strings.Compare(Config.Crypt.PkiTyp, "ecc") == 0:
+		priv, _ := readPrivateKeyFromPem(Config.Crypt.PkiPath)
+		s = priv
+		v = &crypt.EccVerify{Pub: &priv.PublicKey}
 	default:
 		return nil, errors.New("newCryptPlug: unsupport sign algorithm")
 	}
+
+	//hash
 	switch {
 	case strings.Compare(Config.Crypt.HashTyp, "sm3") == 0:
-		v = SM3
+		opts = SM3
 		h = sm3.New()
 	case strings.Compare(Config.Crypt.HashTyp, "sha256") == 0:
 		h = sha256.New()
-		v = crypto.SHA256
+		opts = crypto.SHA256
 	default:
 		return nil, errors.New("newCryptPlug: unsupport hash algorithm")
 	}
-	return crypt.New(h, s, v), nil
+
+	//cipher
+	switch {
+	case strings.Compare(Config.Crypt.CipherTyp, "sm4") == 0:
+		cip = &crypt.Sm4Cipher{}
+	case strings.Compare(Config.Crypt.CipherTyp, "aes") == 0:
+
+	default:
+		return nil, errors.New("newCryptPlug: unsupport cipher algorithm")
+	}
+
+	return crypt.New(h, s, opts, p, cip, v), nil
 }

@@ -43,11 +43,11 @@ func (r *raft) LeaderID() string {
 }
 
 func (r *raft) Peers() []consensus.PeerInfo {
-	logger.Infof("list Peers")
+	logger.Infof("api list Peers")
 	var peers []consensus.PeerInfo
 	localPeer := consensus.PeerInfo{ID: r.localPlainID, Addr: r.localAddr, Model: r.localModel, IsLeader: r.IsLeader()}
 	peers = append(peers, localPeer)
-	logger.Infof("PeerInfo [ID:%s, Addr:%s, Model:%d, IsLeader:%v]", localPeer.ID, localPeer.Addr, localPeer.Model, localPeer.IsLeader)
+	logger.Infof("self PeerInfo [ID:%s, Addr:%s, Model:%d, IsLeader:%v]", localPeer.ID, localPeer.Addr, localPeer.Model, localPeer.IsLeader)
 	for _, p := range r.peers {
 		peer := consensus.PeerInfo{
 			ID:    string(p.id),
@@ -107,7 +107,7 @@ func (r *raft) AppendEntries(log []byte) {
 	if r.IsLeader() {
 		log = append(miscellaneous.E32func(0), log...)
 		r.log = append(r.log, logEntry{index: r.getLastIndex() + 1, term: r.currentTerm, data: log})
-		logger.Infof("leader add log, term:%d, lastIndex:%d", r.currentTerm, r.getLastIndex())
+		logger.Infof("leader append log length:%d, term:%d, lastIndex:%d", len(log), r.currentTerm, r.getLastIndex())
 	} else {
 		logger.Infof("this not leader, the new leader is %x", r.leaderID)
 	}

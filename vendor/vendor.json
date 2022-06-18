@@ -1,0 +1,55 @@
+{
+	"comment": "",
+	"ignore": "",
+	"package": [
+		{
+			"checksumSHA1": "b5GnZlLJU+TxUXOhgV1ll4BDLUA=",
+			"path": "github.com/rcrowley/go-metrics",
+			"revision": "e181e095bae94582363434144c61a9653aff6e50",
+			"revisionTime": "2017-11-28T17:04:26Z"
+		},
+		{
+			"checksumSHA1": "XIoxSIGqbXAl/SODy5wBMMAcUf8=",
+			"path": "github.com/shirou/gopsutil/cpu",
+			"revision": "8048a2e9c5773235122027dd585cf821b2af1249",
+			"revisionTime": "2018-08-01T05:39:43Z"
+		},
+		{
+			"checksumSHA1": "9OSpr5KlFdWQRP/AF+sRyudj3F0=",
+			"path": "github.com/shirou/gopsutil/disk",
+			"revision": "8048a2e9c5773235122027dd585cf821b2af1249",
+			"revisionTime": "2018-08-01T05:39:43Z"
+		},
+		{
+			"checksumSHA1": "QwCLz/Gg4cU5jpWaTGQwEBSWaIM=",
+			"path": "github.com/shirou/gopsutil/internal/common",
+			"revision": "8048a2e9c5773235122027dd585cf821b2af1249",
+			"revisionTime": "2018-08-01T05:39:43Z"
+		},
+		{
+			"checksumSHA1": "stVDjpbFfvYhunXZJMfuAP5vCPk=",
+			"path": "github.com/shirou/gopsutil/mem",
+			"revision": "8048a2e9c5773235122027dd585cf821b2af1249",
+			"revisionTime": "2018-08-01T05:39:43Z"
+		},
+		{
+			"checksumSHA1": "+UyblIP8PMJoCTtZCNKBb9Asy3Q=",
+			"path": "github.com/tjfoc/gmsm/sm2",
+			"revision": "31bd720984f8ed12526f8667a2b4432f3132da0f",
+			"revisionTime": "2018-07-10T05:27:16Z"
+		},
+		{
+			"checksumSHA1": "FplhS/qgoLitr1CDiqUwKI8c0nM=",
+			"path": "github.com/tjfoc/gmsm/sm3",
+			"revision": "31bd720984f8ed12526f8667a2b4432f3132da0f",
+			"revisionTime": "2018-07-10T05:27:16Z"
+		},
+		{
+			"checksumSHA1": "aicNCnqHxDMfykd9euM+lbt6FhY=",
+			"path": "github.com/tjfoc/gmsm/sm4",
+			"revision": "31bd720984f8ed12526f8667a2b4432f3132da0f",
+			"revisionTime": "2018-07-10T05:27:16Z"
+		}
+	],
+	"rootPath": "github.com/tjfoc/tjfoc"
+}

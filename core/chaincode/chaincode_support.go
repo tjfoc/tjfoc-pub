@@ -37,35 +37,33 @@ import (
 
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/protobuf/proto"
-	logging "github.com/op/go-logging"
 	"github.com/spf13/viper"
 )
 
 // 一些全局默认的配置,可通过配置文件读取
 const (
-	DevModeUserRunsChaincode       string = "dev"
-	chaincodeStartupTimeoutDefault int    = 5000
-	peerIpDefault                  string = "0.0.0.0"
-	peerPortDefault                string = "7051"
+	peerIpDefault   string = "0.0.0.0"
+	peerPortDefault string = "7051"
 )
 
 //ChaincodeSupport 基本结构
 type ChaincodeSupport struct {
 	runningChaincodes   *runningChaincodes
 	rebootingChaincodes *rebootingChaincodes
+	currentTxContent    *pb.ChaincodeMessage
 	ip                  string
 	port                string
-	ccStartupTimeout    time.Duration
-	peerTLSCertFile     string
-	peerTLSKeyFile      string
-	peerTLSSvrHostOrd   string
-	keepalive           time.Duration
-	chaincodeLogLevel   string
-	shimLogLevel        string
-	logFormat           string
-	executetimeout      time.Duration
-	userRunsCC          bool
-	peerTLS             bool
+
+	peerTLS           bool
+	peerTLSCertFile   string
+	peerTLSKeyFile    string
+	peerTLSSvrHostOrd string
+
+	ccStartupTimeout time.Duration
+	executetimeout   time.Duration
+	keepalive        time.Duration
+
+	userRunsCC bool
 }
 
 type rebootingChaincodes struct {
@@ -74,10 +72,9 @@ type rebootingChaincodes struct {
 }
 
 type rebootInfo struct {
-	needReboot bool
-	nextstate  *nextStateInfo
-	txid       string
-	txctx      *transactionContext
+	isreboot bool
+	txid     string
+	txctx    *transactionContext
 }
 
 type runningChaincodes struct {
@@ -90,7 +87,7 @@ type chaincodeRTEnv struct {
 	handler *Handler
 }
 
-var chaincodeLogger = flogging.MustGetLogger("chaincode_support")
+var chaincodeSupportLogger = flogging.MustGetLogger("chaincode_support")
 
 var theChaincodeSupport *ChaincodeSupport
 
@@ -99,6 +96,7 @@ func NewChaincodeSupport() *ChaincodeSupport {
 	theChaincodeSupport = &ChaincodeSupport{
 		runningChaincodes:   &runningChaincodes{chaincodeMap: make(map[string]*chaincodeRTEnv), launchStarted: make(map[string]bool)},
 		rebootingChaincodes: &rebootingChaincodes{chaincodeMap: make(map[string]*rebootInfo)},
+		currentTxContent:    nil,
 	}
 
 	theChaincodeSupport.ip = viper.GetString("Docker.Ip")
@@ -111,43 +109,21 @@ func NewChaincodeSupport() *ChaincodeSupport {
 	}
 
 	theChaincodeSupport.keepalive = time.Duration(0) * time.Second
-
-	execto := time.Duration(30) * time.Second
-	if eto := viper.GetDuration("Chaincode.Timeout"); eto <= time.Duration(1)*time.Second {
-		chaincodeLogger.Warningf("Invalid execute timeout value %s (should be at least 1s); defaulting to %s", eto, execto)
-	} else {
-		chaincodeLogger.Infof("Setting execute timeout value to %s", eto)
-		execto = eto
-	}
-	ccstartuptimeout := viper.GetDuration("Chaincode.Timeout")
-	theChaincodeSupport.executetimeout = execto
-	theChaincodeSupport.ccStartupTimeout = ccstartuptimeout
+	theChaincodeSupport.executetimeout = time.Duration(30) * time.Second
+	theChaincodeSupport.ccStartupTimeout = time.Duration(30) * time.Second
 
 	return theChaincodeSupport
 }
 
-func getLogLevelFromViper(module string) string {
-	levelString := viper.GetString("chaincode.logging." + module)
-	_, err := logging.LogLevel(levelString)
-
-	if err == nil {
-		chaincodeLogger.Debugf("CORE_CHAINCODE_%s set to level %s", strings.ToUpper(module), levelString)
-	} else {
-		chaincodeLogger.Warningf("CORE_CHAINCODE_%s has invalid log level %s. defaulting to %s", strings.ToUpper(module), levelString, flogging.DefaultLevel())
-		levelString = flogging.DefaultLevel()
-	}
-	return levelString
-}
-
 //Register chaincode_shim的grpc实现方法
 func (chaincodeSupport *ChaincodeSupport) Register(stream pb.ChaincodeSupport_RegisterServer) error {
-	chaincodeLogger.Debug("entry Register")
+	chaincodeSupportLogger.Debug("entry Register")
 	return HandleChaincodeStream(chaincodeSupport, stream.Context(), stream)
 }
 
 //registerHandler shim注册时会调用，用来管理运行的chaincode
 func (chaincodeSupport *ChaincodeSupport) registerHandler(chaincodehandler *Handler) error {
-	chaincodeLogger.Debug("entry registerHandler")
+	chaincodeSupportLogger.Debug("entry registerHandler")
 
 	key := chaincodehandler.ChaincodeID.Name
 
@@ -162,18 +138,18 @@ func (chaincodeSupport *ChaincodeSupport) registerHandler(chaincodehandler *Hand
 	chaincodeSupport.rebootingChaincodes.Lock()
 	if _, ok := chaincodeSupport.rebootingChaincodes.chaincodeMap[key]; !ok {
 		chaincodeSupport.rebootingChaincodes.chaincodeMap[key] = &rebootInfo{
-			needReboot: false,
+			isreboot: false,
 		}
 	}
 	chaincodeSupport.rebootingChaincodes.Unlock()
 
-	chaincodeLogger.Infof("registered handler complete for chaincode [%s]!", key)
+	chaincodeSupportLogger.Infof("registered handler complete for chaincode [%s]!", key)
 	return nil
 }
 
 //Execute 执行chaincode 并返回执行结果
 func (chaincodeSupport *ChaincodeSupport) Execute(ctxt context.Context, cccid *ccprovider.CCContext, msg *pb.ChaincodeMessage, timeout time.Duration) (*pb.ChaincodeMessage, error) {
-	chaincodeLogger.Debug("entry Execute")
+	chaincodeSupportLogger.Debug("entry Execute")
 	canName := cccid.GetCanonicalName()
 	var notfy chan *pb.ChaincodeMessage
 	var err error
@@ -237,24 +213,24 @@ func (chaincodeSupport *ChaincodeSupport) Launch(context context.Context, cccid 
 	if err == nil {
 		err = chaincodeSupport.sendReady(context, cccid, chaincodeSupport.ccStartupTimeout)
 		if err != nil {
-			chaincodeLogger.Errorf("sending init failed(%s)", err)
+			chaincodeSupportLogger.Errorf("sending init failed(%s)", err)
 			err = fmt.Errorf("Failed to init chaincode(%s)", err)
 		}
-		chaincodeLogger.Debug("sending init completed")
+		chaincodeSupportLogger.Debug("sending init completed")
 	} else {
 		return cID, cMsg, err
 	}
-	chaincodeLogger.Debug("LaunchChaincode complete")
+	chaincodeSupportLogger.Debug("LaunchChaincode complete")
+
 	//注册完成之后恢复之前触发重启的交易
 	theChaincodeSupport.rebootingChaincodes.Lock()
-	if theChaincodeSupport.rebootingChaincodes.chaincodeMap[cccid.GetCanonicalName()].needReboot {
-		chaincodeLogger.Info("this is a reboot container,register end retry tx!")
+	if theChaincodeSupport.currentTxContent != nil {
+		chaincodeSupportLogger.Info("this is a reboot container,rexcute last tx!")
 		temptxid := theChaincodeSupport.rebootingChaincodes.chaincodeMap[cccid.GetCanonicalName()].txid
 		temptxctx := theChaincodeSupport.rebootingChaincodes.chaincodeMap[cccid.GetCanonicalName()].txctx
 		theChaincodeSupport.runningChaincodes.chaincodeMap[cccid.GetCanonicalName()].handler.txCtxs[temptxid] = temptxctx
-		theChaincodeSupport.runningChaincodes.chaincodeMap[cccid.GetCanonicalName()].handler.nextState <- theChaincodeSupport.rebootingChaincodes.chaincodeMap[cccid.GetCanonicalName()].nextstate
-	} else {
-		chaincodeLogger.Info("this is not a reboot container!")
+		theChaincodeSupport.runningChaincodes.chaincodeMap[cccid.GetCanonicalName()].handler.triggerNextState(theChaincodeSupport.currentTxContent, true)
+		theChaincodeSupport.rebootingChaincodes.chaincodeMap[cccid.GetCanonicalName()].isreboot = false
 	}
 	theChaincodeSupport.rebootingChaincodes.Unlock()
 	return cID, cMsg, err
@@ -262,7 +238,7 @@ func (chaincodeSupport *ChaincodeSupport) Launch(context context.Context, cccid 
 
 //launchAndWaitForRegister 启动一个运行chaincode的docker容器，并等待docker容器[chaincode] 发送注册指令
 func (chaincodeSupport *ChaincodeSupport) launchAndWaitForRegister(ctxt context.Context, cccid *ccprovider.CCContext, builder api.BuildSpecFactory) error {
-	chaincodeLogger.Debug("create container, start container , build docker ")
+	chaincodeSupportLogger.Debug("create container, start container , build docker ")
 	//chaincodeName:version
 	canName := cccid.GetCanonicalName()
 
@@ -272,7 +248,11 @@ func (chaincodeSupport *ChaincodeSupport) launchAndWaitForRegister(ctxt context.
 		notfy = chaincodeSupport.preLaunchSetup(canName)
 		return nil
 	}
-	shimLogging := viper.GetString("Docker.Loglevel")
+	shimLogging := viper.GetString("Log.DockerLevel")
+	if shimLogging == "" {
+		shimLogging = "Error"
+	}
+	shimLogging = strings.ToUpper(shimLogging)
 	//此参数为测试参数，正常是启动某个服务（会一直阻塞），这里做测试写个死循环，保证容器不退出
 	//args := []string{"bash", "-c", "cd /tmp;  while true; do sleep 20170504; done"}
 	args := []string{"chaincode", theChaincodeSupport.ip + ":" + theChaincodeSupport.port, canName, cccid.Name, shimLogging}
@@ -307,10 +287,10 @@ func (chaincodeSupport *ChaincodeSupport) launchAndWaitForRegister(ctxt context.
 	}
 
 	//启动成功，等待chaincode容器 发送注册指令
-	chaincodeLogger.Debugf("waiting for chaincode register...")
+	chaincodeSupportLogger.Debugf("waiting for chaincode register...")
 	select {
 	case ok := <-notfy:
-		chaincodeLogger.Infof("xxx in case . ok:%v", ok)
+		chaincodeSupportLogger.Infof("xxx in case . ok:%v", ok)
 		if !ok {
 			err = fmt.Errorf("registration failed for %s(tx:%s)", canName, cccid.TxID)
 		}
@@ -318,12 +298,12 @@ func (chaincodeSupport *ChaincodeSupport) launchAndWaitForRegister(ctxt context.
 		err = fmt.Errorf("Timeout expired while starting chaincode %s(tx:%s)", canName, cccid.TxID)
 	}
 	if err != nil {
-		chaincodeLogger.Debugf("stopping due to error while launching %s", err)
+		chaincodeSupportLogger.Debugf("stopping due to error while launching %s", err)
 		// errIgnore := chaincodeSupport.Stop(ctxt, cccid, cds)
 		// if errIgnore != nil {
-		// 	chaincodeLogger.Debugf("error on stop %s(%s)", errIgnore, err)
+		// 	chaincodeSupportLogger.Debugf("error on stop %s(%s)", errIgnore, err)
 		// }
-		chaincodeLogger.Info("等待超时，需要关闭docker。。")
+		chaincodeSupportLogger.Info("等待超时，需要关闭docker。。")
 	}
 	return err
 }
@@ -336,7 +316,7 @@ func (chaincodeSupport *ChaincodeSupport) sendReady(context context.Context, ccc
 	var ok bool
 	if chrte, ok = chaincodeSupport.runningChaincodes.chaincodeMap[canName]; !ok {
 		chaincodeSupport.runningChaincodes.Unlock()
-		chaincodeLogger.Debugf("handler not found for chaincode %s", canName)
+		chaincodeSupportLogger.Debugf("handler not found for chaincode %s", canName)
 		return fmt.Errorf("handler not found for chaincode %s", canName)
 	}
 	chaincodeSupport.runningChaincodes.Unlock()
@@ -349,7 +329,7 @@ func (chaincodeSupport *ChaincodeSupport) sendReady(context context.Context, ccc
 	if notfy != nil {
 		select {
 		case ccMsg := <-notfy:
-			chaincodeLogger.Debugf("case notfy. %s", ccMsg.Type.String())
+			chaincodeSupportLogger.Debugf("case notfy. %s", ccMsg.Type.String())
 			if ccMsg.Type == pb.ChaincodeMessage_ERROR {
 				err = fmt.Errorf("Error initializing container %s: %s", canName, string(ccMsg.Payload))
 			}
@@ -363,7 +343,7 @@ func (chaincodeSupport *ChaincodeSupport) sendReady(context context.Context, ccc
 				// return res so that endorser can anylyze it.
 			}
 		case <-time.After(timeout):
-			chaincodeLogger.Error("Timeout")
+			chaincodeSupportLogger.Error("Timeout")
 			err = fmt.Errorf("Timeout expired while executing send init message")
 		}
 	}
@@ -447,7 +427,7 @@ func GenerateDockerBuildGolang(tw *tar.Writer, srcContent []byte, chaincodeName 
 
 //DockerBuild 创建镜像
 func DockerBuild(srcContent []byte, chaincodeName string) []byte {
-	envImage := viper.GetString("Docker.BaseImage") + ":" + viper.GetString("Docker.Version")
+	envImage := "tjfoc/tjfoc-ccenv:" + viper.GetString("Docker.BaseImageVersion")
 	//chaincode在docker容器中的路径
 	pkgname := "/home/" + chaincodeName + ".go"
 	//编译chaincode的参数

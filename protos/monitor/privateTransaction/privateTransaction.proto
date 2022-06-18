@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package privateTransaction;
+
+message Header {
+    int64 version = 1;
+    int64 timestamp = 2;
+
+}
+
+message InterestedParty{
+    repeated bytes part = 1;
+}
+
+message TxId{
+    bytes id = 1;
+}
+message TxData{
+    bytes data = 1;
+}
+
+message Transaction{
+    Header header = 1;
+    InterestedParty NodeAndSDK = 2;
+    TxData data =3;
+    TxId id = 4;
+}

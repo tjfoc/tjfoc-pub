@@ -405,7 +405,7 @@ func (vm *DockerVM) Destroy(ctxt context.Context, containerName string, force bo
 	return err
 }
 func getImageNameFromContainerName(containerName string) (string, error) {
-	imageName := strings.ToLower(fmt.Sprintf("%s-%s", containerName, hex.EncodeToString([]byte(containerName))))
+	imageName := fmt.Sprintf("%s-%s", containerName, hex.EncodeToString([]byte(containerName)))
 	if !imageRegExp.MatchString(imageName) {
 		return "", fmt.Errorf("Error constructing Docker VM Name. 'containerName:%s,imageName:%s' bread Docker's repository nameing rules", containerName, imageName)
 	}
@@ -425,7 +425,7 @@ func BaseImageExist() bool {
 	var isExist = false
 	for _, img := range imgs {
 		for _, v := range img.RepoTags {
-			if v == viper.GetString("Docker.BaseImage")+":"+viper.GetString("Docker.Version") {
+			if v == "tjfoc/tjfoc-ccenv:"+viper.GetString("Docker.BaseImageVersion") {
 				isExist = true
 				break
 			}

@@ -17,23 +17,26 @@ limitations under the License.
 package chaincode
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/looplab/fsm"
-	logging "github.com/op/go-logging"
 
 	"github.com/tjfoc/tjfoc/core/common/ccprovider"
+	"github.com/tjfoc/tjfoc/core/common/flogging"
 	"github.com/tjfoc/tjfoc/core/worldstate"
 	pb "github.com/tjfoc/tjfoc/protos/chaincode"
+	"github.com/tjfoc/tjfoc/protos/monitor"
+	"google.golang.org/grpc"
 )
 
 const (
@@ -42,6 +45,8 @@ const (
 	readystate       = "ready"       //in:ESTABLISHED,TRANSACTION, rcv:COMPLETED
 	endstate         = "end"         //in:INIT,ESTABLISHED, rcv: error, terminate container
 )
+
+var chaincodeHandleLogger = flogging.MustGetLogger("chaincode_handle")
 
 //ChaincodeStream 通信
 type ChaincodeStream interface {
@@ -57,7 +62,6 @@ type Handler struct {
 	ChatStream       ChaincodeStream
 	FSM              *fsm.FSM
 	ChaincodeID      *pb.ChaincodeID
-	ccInstance       *ChaincodeInstance
 	txCtxs           map[string]*transactionContext
 	chaincodeSupport *ChaincodeSupport
 	registered       bool
@@ -69,40 +73,8 @@ type Handler struct {
 
 	// used to do Send after making sure the state transition is complete
 	nextState chan *nextStateInfo
-}
 
-//ChaincodeInstance 合约的相关参数
-type ChaincodeInstance struct {
-	ChainID          string
-	ChaincodeName    string
-	ChaincodeVersion string
-}
-
-func getChaincodeInstance(ccName string) *ChaincodeInstance {
-	b := []byte(ccName)
-	ci := &ChaincodeInstance{}
-
-	//compute suffix (ie, chain name)
-	i := bytes.IndexByte(b, '/')
-	if i >= 0 {
-		if i < len(b)-1 {
-			ci.ChainID = string(b[i+1:])
-		}
-		b = b[:i]
-	}
-
-	//compute version
-	i = bytes.IndexByte(b, ':')
-	if i >= 0 {
-		if i < len(b)-1 {
-			ci.ChaincodeVersion = string(b[i+1:])
-		}
-		b = b[:i]
-	}
-	// remaining is the chaincode name
-	ci.ChaincodeName = string(b)
-
-	return ci
+	getLastHeartResponse bool
 }
 
 type transactionContext struct {
@@ -120,14 +92,15 @@ type nextStateInfo struct {
 
 //HandleChaincodeStream 处理chaincode与peer通信
 func HandleChaincodeStream(chaincodeSupport *ChaincodeSupport, ctxt context.Context, stream ChaincodeStream) error {
-	chaincodeLogger.Debug("entry HandleChaincodeStream")
+	chaincodeHandleLogger.Debug("entry HandleChaincodeStream")
 	handler := newChaincodeSupportHandler(chaincodeSupport, stream)
 	return handler.processStream()
 }
 
 func newChaincodeSupportHandler(chaincodeSupport *ChaincodeSupport, peerChatStream ChaincodeStream) *Handler {
 	v := &Handler{
-		ChatStream: peerChatStream,
+		ChatStream:           peerChatStream,
+		getLastHeartResponse: true,
 	}
 	v.chaincodeSupport = chaincodeSupport
 	//we want this to block
@@ -156,24 +129,23 @@ func newChaincodeSupportHandler(chaincodeSupport *ChaincodeSupport, peerChatStre
 			{Name: pb.ChaincodeMessage_INIT.String(), Src: []string{readystate}, Dst: readystate},
 			{Name: pb.ChaincodeMessage_TRANSACTION.String(), Src: []string{readystate}, Dst: readystate},
 			{Name: pb.ChaincodeMessage_GET_STATE_BY_PREFIX.String(), Src: []string{readystate}, Dst: readystate},
+			{Name: pb.ChaincodeMessage_REQUIRE_CRYPT.String(), Src: []string{readystate}, Dst: readystate},
+			{Name: pb.ChaincodeMessage_REQUIRE_COMPARE.String(), Src: []string{readystate}, Dst: readystate},
 		},
 		fsm.Callbacks{
-			"before_" + pb.ChaincodeMessage_REGISTER.String():  func(e *fsm.Event) { v.beforeRegisterEvent(e, v.FSM.Current()) },
-			"before_" + pb.ChaincodeMessage_COMPLETED.String(): func(e *fsm.Event) { v.beforeCompletedEvent(e, v.FSM.Current()) },
-			"after_" + pb.ChaincodeMessage_GET_STATE.String():  func(e *fsm.Event) { v.afterGetState(e, v.FSM.Current()) },
-			"after_" + pb.ChaincodeMessage_GET_STATEN.String(): func(e *fsm.Event) { v.afterGetStaten(e, v.FSM.Current()) },
-			// "after_" + pb.ChaincodeMessage_GET_STATE_BY_RANGE.String():  func(e *fsm.Event) { v.afterGetStateByRange(e, v.FSM.Current()) },
-			// "after_" + pb.ChaincodeMessage_GET_QUERY_RESULT.String():    func(e *fsm.Event) { v.afterGetQueryResult(e, v.FSM.Current()) },
-			// "after_" + pb.ChaincodeMessage_GET_HISTORY_FOR_KEY.String(): func(e *fsm.Event) { v.afterGetHistoryForKey(e, v.FSM.Current()) },
-			// "after_" + pb.ChaincodeMessage_QUERY_STATE_NEXT.String():    func(e *fsm.Event) { v.afterQueryStateNext(e, v.FSM.Current()) },
-			// "after_" + pb.ChaincodeMessage_QUERY_STATE_CLOSE.String():   func(e *fsm.Event) { v.afterQueryStateClose(e, v.FSM.Current()) },
-			"after_" + pb.ChaincodeMessage_PUT_STATE.String():           func(e *fsm.Event) { v.enterBusyState(e, v.FSM.Current()) },
-			"after_" + pb.ChaincodeMessage_DEL_STATE.String():           func(e *fsm.Event) { v.enterBusyState(e, v.FSM.Current()) },
-			"after_" + pb.ChaincodeMessage_DEL_STATEN.String():          func(e *fsm.Event) { v.enterBusyState(e, v.FSM.Current()) },
-			"after_" + pb.ChaincodeMessage_INVOKE_CHAINCODE.String():    func(e *fsm.Event) { v.enterBusyState(e, v.FSM.Current()) },
-			"enter_" + establishedstate:                                 func(e *fsm.Event) { v.enterEstablishedState(e, v.FSM.Current()) },
-			"enter_" + readystate:                                       func(e *fsm.Event) { v.enterReadyState(e, v.FSM.Current()) },
+			"before_" + pb.ChaincodeMessage_REGISTER.String():           func(e *fsm.Event) { v.beforeRegisterEvent(e, v.FSM.Current()) },
+			"before_" + pb.ChaincodeMessage_COMPLETED.String():          func(e *fsm.Event) { v.beforeCompletedEvent(e, v.FSM.Current()) },
+			"after_" + pb.ChaincodeMessage_GET_STATE.String():           func(e *fsm.Event) { v.enterGetState(e, v.FSM.Current()) },
+			"after_" + pb.ChaincodeMessage_GET_STATEN.String():          func(e *fsm.Event) { v.enterGetStaten(e, v.FSM.Current()) },
 			"after_" + pb.ChaincodeMessage_GET_STATE_BY_PREFIX.String(): func(e *fsm.Event) { v.enterGetStateByPrefix(e, v.FSM.Current()) },
+			"after_" + pb.ChaincodeMessage_PUT_STATE.String():           func(e *fsm.Event) { v.enterPutState(e, v.FSM.Current()) },
+			"after_" + pb.ChaincodeMessage_DEL_STATE.String():           func(e *fsm.Event) { v.enterDeleteState(e, v.FSM.Current()) },
+			"after_" + pb.ChaincodeMessage_DEL_STATEN.String():          func(e *fsm.Event) { v.enterDeleteStaten(e, v.FSM.Current()) },
+			"after_" + pb.ChaincodeMessage_REQUIRE_CRYPT.String():       func(e *fsm.Event) { v.enterRequireCrypt(e, v.FSM.Current()) },
+			"after_" + pb.ChaincodeMessage_REQUIRE_COMPARE.String():     func(e *fsm.Event) { v.enterRequireCompare(e, v.FSM.Current()) },
+			//"after_" + pb.ChaincodeMessage_INVOKE_CHAINCODE.String():    func(e *fsm.Event) { v.enterInvokeChaincode(e, v.FSM.Current()) },
+			"enter_" + establishedstate: func(e *fsm.Event) { v.enterEstablishedState(e, v.FSM.Current()) },
+			"enter_" + readystate:       func(e *fsm.Event) { v.enterReadyState(e, v.FSM.Current()) },
 			// "enter_" + endstate:                                      func(e *fsm.Event) { v.enterEndState(e, v.FSM.Current()) },
 		},
 	)
@@ -199,16 +171,12 @@ func (handler *Handler) sendExecuteMessage(ctxt context.Context, chainID string,
 	if err != nil {
 		return nil, err
 	}
-	if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-		chaincodeLogger.Debugf("[%x]Inside sendExecuteMessage. Message %s", shorttxid(msg.Txid), msg.Type.String())
-	}
-
 	//if security is disabled the context elements will just be nil
 	// if err = handler.setChaincodeProposal(signedProp, prop, msg); err != nil {
 	// 	return nil, err
 	// }
 
-	chaincodeLogger.Debugf("[%x]sendExecuteMsg trigger event %s", shorttxid(msg.Txid), msg.Type)
+	chaincodeHandleLogger.Debugf("[%x]sendExecuteMsg trigger event %s", shorttxid(msg.Txid), msg.Type)
 	handler.triggerNextState(msg, true)
 
 	return txctx.responseNotifier, nil
@@ -216,49 +184,12 @@ func (handler *Handler) sendExecuteMessage(ctxt context.Context, chainID string,
 
 func (handler *Handler) triggerNextState(msg *pb.ChaincodeMessage, send bool) {
 	//this will send Async
-	defer func() {
-		if err := recover(); err != nil {
-			chaincodeLogger.Warning("panic in triggerNextState!")
-			name := handler.ChaincodeID.Name
-			index := strings.Index(name, "_")
-			chaincodeName := name[:index]
-			name = name[index+1:]
-			index = strings.Index(name, "_")
-			chaincodeVersion := name[:index]
-			cccid := ccprovider.NewCCContext("tjfoc", chaincodeName, chaincodeVersion, "", theChaincodeSupport.ip, theChaincodeSupport.port, false)
-			//if !theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].ispanic {
-			//重启docker
-			theChaincodeSupport.rebootingChaincodes.Lock()
-			theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].needReboot = true
-			theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].nextstate = &nextStateInfo{msg: msg, sendToCC: send, sendSync: false}
-			theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].txid = msg.Txid
-			theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].txctx = handler.txCtxs[msg.Txid]
-			theChaincodeSupport.rebootingChaincodes.Unlock()
-			if _, _, err := theChaincodeSupport.Launch(context.Background(), cccid, []byte("")); err != nil {
-				chaincodeLogger.Errorf("Reboot chaincode [%s] failed!Delete it!", cccid.Name+"_"+cccid.Version)
-				theChaincodeSupport.Stop(context.Background(), cccid, true)
-				//theChaincodeSupport.rebootingChaincodes.Lock()
-				//delete(theChaincodeSupport.rebootingChaincodes.chaincodeMap, handler.ChaincodeID.Name)
-				//theChaincodeSupport.rebootingChaincodes.Unlock()
-			} else {
-				chaincodeLogger.Warningf("Reboot chaincode [%s] success!", handler.ChaincodeID.Name)
-			}
-			//} else {
-			//删除chaincode
-			//chaincodeLogger.Errorf("Delete chaincode [%s] because of panic!", cccid.Name+"_"+cccid.Version)
-			//theChaincodeSupport.Stop(context.Background(), cccid, true)
-			//theChaincodeSupport.rebootingChaincodes.Lock()
-			//delete(theChaincodeSupport.rebootingChaincodes.chaincodeMap, handler.ChaincodeID.Name)
-			//theChaincodeSupport.rebootingChaincodes.Unlock()
-			//}
-		}
-	}()
 	handler.nextState <- &nextStateInfo{msg: msg, sendToCC: send, sendSync: false}
 }
 
 func (handler *Handler) processStream() error {
-	chaincodeLogger.Debug("entry handler processStream")
-	//defer handler.deregister()
+	chaincodeHandleLogger.Debug("entry handler processStream")
+
 	msgAvail := make(chan *pb.ChaincodeMessage)
 	var nsInfo *nextStateInfo
 	var in *pb.ChaincodeMessage
@@ -270,6 +201,14 @@ func (handler *Handler) processStream() error {
 
 	//catch send errors and bail now that sends aren't synchronous
 	errc := make(chan error, 1)
+
+	var tker *time.Ticker
+	if theChaincodeSupport.keepalive > 0 {
+		tker = time.NewTicker(theChaincodeSupport.keepalive * time.Second)
+	} else {
+		tker = time.NewTicker(1 * time.Hour)
+	}
+
 	for {
 		in = nil
 		err = nil
@@ -279,62 +218,100 @@ func (handler *Handler) processStream() error {
 			go func() {
 				var in2 *pb.ChaincodeMessage
 				in2, err = handler.ChatStream.Recv()
-				chaincodeLogger.Debug("/***************************  Recv a ChaincodeMessage  **********************************/")
+				chaincodeHandleLogger.Debug("/***************************  Recv a ChaincodeMessage  **********************************/")
 				msgAvail <- in2
 			}()
 		}
 		select {
 		case sendErr := <-errc:
-			//chaincodeLogger.Error("case sendErr")
+			//chaincodeHandleLogger.Error("case sendErr")
 			if sendErr != nil {
 				return sendErr
 			}
 			//send was successful, just continue
 			continue
 		case in = <-msgAvail:
-			chaincodeLogger.Debug("case msgAvail")
+			chaincodeHandleLogger.Debug("case msgAvail")
 			if err == io.EOF {
-				chaincodeLogger.Error("close chan EOF")
-				close(handler.nextState)
+				//对端正常关闭连接
+				chaincodeHandleLogger.Error("close chan EOF")
 				return err
-			} else if err != nil {
-				chaincodeLogger.Error("close chan Unknow err!")
-				close(handler.nextState)
-				return err
-			} else if in == nil {
-				chaincodeLogger.Error("close chan nil message!")
-				close(handler.nextState)
-				return fmt.Errorf("Received nil message, ending chaincode support stream")
+			} else if err != nil || in == nil {
+				//异常的连接断开，尝试重启
+
+				chaincodeHandleLogger.Warning("connection with docker was closed unexpectedly!try to reboot it!")
+				name := handler.ChaincodeID.Name
+				index := strings.Index(name, "_")
+				chaincodeName := name[:index]
+				name = name[index+1:]
+				index = strings.Index(name, "_")
+				chaincodeVersion := name[:index]
+				cccid := ccprovider.NewCCContext("tjfoc", chaincodeName, chaincodeVersion, "", theChaincodeSupport.ip, theChaincodeSupport.port, false)
+
+				theChaincodeSupport.rebootingChaincodes.Lock()
+				if !theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].isreboot {
+					theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].isreboot = true
+					if theChaincodeSupport.currentTxContent != nil {
+						theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].txid = theChaincodeSupport.currentTxContent.Txid
+						theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].txctx = handler.txCtxs[theChaincodeSupport.currentTxContent.Txid]
+					}
+				} else {
+					theChaincodeSupport.rebootingChaincodes.Unlock()
+					return nil
+				}
+				theChaincodeSupport.rebootingChaincodes.Unlock()
+
+				if _, _, err := theChaincodeSupport.Launch(context.Background(), cccid, []byte("")); err != nil {
+					//重启失败
+					chaincodeHandleLogger.Errorf("Reboot chaincode [%s] failed!Delete it!", cccid.Name+"_"+cccid.Version)
+					theChaincodeSupport.Stop(context.Background(), cccid, true)
+				} else {
+					//重启成功
+					chaincodeHandleLogger.Warningf("Reboot chaincode [%s] success!", handler.ChaincodeID.Name)
+				}
+
+				//有新的handler（socket）了，退出旧的handler（socket），不需要从runningchaincode中删除该旧handler，由于key使用的是同一个名字，重启之后旧已经覆盖了
+				if err != nil {
+					chaincodeHandleLogger.Error("close chan Unknow err!")
+					return err
+				}
+				if in == nil {
+					chaincodeHandleLogger.Error("close chan nil message!")
+					return errors.New("recv nil message!")
+				}
 			}
-			// we can spin off another Recv again
+			//正常接受消息
 			recv = true
 			if in.Type == pb.ChaincodeMessage_KEEPALIVE {
-				chaincodeLogger.Debug("Received KEEPALIVE Response")
+				chaincodeHandleLogger.Debug("Received KEEPALIVE Response")
+				handler.getLastHeartResponse = true
 				continue
 			}
 		case nsInfo = <-handler.nextState:
-			chaincodeLogger.Debug("case nextState")
+			chaincodeHandleLogger.Debug("case nextState")
 			in = nsInfo.msg
 			if in == nil {
-				chaincodeLogger.Debug("Next state nil message, ending chaincode support stream")
+				chaincodeHandleLogger.Debug("Next state nil message, ending chaincode support stream")
 				return fmt.Errorf("Next state nil message, ending chaincode support stream")
 			}
-		case <-handler.waitForKeepaliveTimer():
-			chaincodeLogger.Infof("case waitForKeepaliveTimer")
-			if handler.chaincodeSupport.keepalive <= 0 {
-				chaincodeLogger.Errorf("Invalid select: keepalive not on (keepalive=%d)", handler.chaincodeSupport.keepalive)
+		case <-tker.C:
+			chaincodeHandleLogger.Infof("time to send a heart package!")
+			if !handler.getLastHeartResponse {
+				chaincodeHandleLogger.Error("Heart timeout!")
+				//心跳超时如何处理 有待改善
 				continue
 			}
 			handler.serialSendAsync(&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_KEEPALIVE}, nil)
+			handler.getLastHeartResponse = false
 			continue
 		}
 		err = handler.HandleMessage(in)
 		if err != nil {
-			chaincodeLogger.Errorf("[%v]Error handling message, ending stream: %s", shorttxid(in.Txid), err)
+			chaincodeHandleLogger.Errorf("[%v]Error handling message, ending stream: %s", shorttxid(in.Txid), err)
 			return fmt.Errorf("Error handling message, ending stream: %s", err)
 		}
 		if nsInfo != nil && nsInfo.sendToCC {
-			chaincodeLogger.Debugf("[%v]sending state message %s", shorttxid(in.Txid), in.Type.String())
+			chaincodeHandleLogger.Debugf("[%v]sending state message %s", shorttxid(in.Txid), in.Type.String())
 			//ready messages are sent sync
 			if nsInfo.sendSync {
 				if in.Type.String() != pb.ChaincodeMessage_READY.String() {
@@ -353,7 +330,7 @@ func (handler *Handler) processStream() error {
 
 //向 Chaincode 发送 ready 状态
 func (handler *Handler) ready(ctxt context.Context, chainID string, txid string) (chan *pb.ChaincodeMessage, error) {
-	chaincodeLogger.Debug("sending READY")
+	chaincodeHandleLogger.Debug("sending READY")
 	txctx, funcErr := handler.createTxContext(ctxt, chainID, txid)
 	if funcErr != nil {
 		return nil, funcErr
@@ -365,15 +342,9 @@ func (handler *Handler) ready(ctxt context.Context, chainID string, txid string)
 
 //HandleMessage 处理消息
 func (handler *Handler) HandleMessage(msg *pb.ChaincodeMessage) error {
-	chaincodeLogger.Debug("enter HandleMessage")
-	if msg.Type == pb.ChaincodeMessage_CC_PANIC {
-		chaincodeLogger.Error("Panic Message")
-		//theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].ispanic = true
-		handler.notify(msg)
-		return nil
-	}
+	chaincodeHandleLogger.Debug("enter HandleMessage")
 	if (msg.Type == pb.ChaincodeMessage_COMPLETED || msg.Type == pb.ChaincodeMessage_ERROR) && handler.FSM.Current() == "ready" {
-		chaincodeLogger.Debug("Complete Message")
+		chaincodeHandleLogger.Debug("Complete Message")
 		handler.notify(msg)
 		return nil
 	}
@@ -384,7 +355,7 @@ func (handler *Handler) HandleMessage(msg *pb.ChaincodeMessage) error {
 	eventErr := handler.FSM.Event(msg.Type.String(), msg)
 	filteredErr := filterError(eventErr)
 	if filteredErr != nil {
-		chaincodeLogger.Errorf("[%x]Failed to trigger FSM event %s: %s", shorttxid(msg.Txid), msg.Type.String(), filteredErr)
+		chaincodeHandleLogger.Errorf("[%x]Failed to trigger FSM event %s: %s", shorttxid(msg.Txid), msg.Type.String(), filteredErr)
 	}
 
 	// return filteredErr
@@ -398,14 +369,14 @@ func filterError(errFromFSMEvent error) error {
 				// Squash the NoTransitionError
 				return errFromFSMEvent
 			}
-			chaincodeLogger.Debugf("Ignoring NoTransitionError: %s", noTransitionErr)
+			chaincodeHandleLogger.Debugf("Ignoring NoTransitionError: %s", noTransitionErr)
 		}
 		if canceledErr, ok := errFromFSMEvent.(*fsm.CanceledError); ok {
 			if canceledErr.Err != nil {
 				// Squash the CanceledError
 				return canceledErr
 			}
-			chaincodeLogger.Debugf("Ignoring CanceledError: %s", canceledErr)
+			chaincodeHandleLogger.Debugf("Ignoring CanceledError: %s", canceledErr)
 		}
 	}
 	return nil
@@ -425,8 +396,6 @@ func (handler *Handler) createTxContext(ctxt context.Context, chainID string, tx
 		responseNotifier: make(chan *pb.ChaincodeMessage, 1),
 	}
 	handler.txCtxs[txid] = txctx
-	//txctx.txsimulator = getTxSimulator(ctxt)
-	//txctx.historyQueryExecutor = getHistoryQueryExecutor(ctxt)
 	return txctx, nil
 }
 
@@ -441,43 +410,6 @@ func (handler *Handler) deleteTxContext(txid string) {
 
 func (handler *Handler) triggerNextStateSync(msg *pb.ChaincodeMessage) {
 	//this will send sync
-	defer func() {
-		if err := recover(); err != nil {
-			chaincodeLogger.Warning("panic in triggerNextStateSync!")
-			name := handler.ChaincodeID.Name
-			index := strings.Index(name, "_")
-			chaincodeName := name[:index]
-			name = name[index+1:]
-			index = strings.Index(name, "_")
-			chaincodeVersion := name[:index]
-			cccid := ccprovider.NewCCContext("tjfoc", chaincodeName, chaincodeVersion, "", theChaincodeSupport.ip, theChaincodeSupport.port, false)
-			//if !theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].ispanic {
-			//重启docker
-			theChaincodeSupport.rebootingChaincodes.Lock()
-			theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].needReboot = true
-			theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].nextstate = &nextStateInfo{msg: msg, sendToCC: true, sendSync: true}
-			theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].txid = msg.Txid
-			theChaincodeSupport.rebootingChaincodes.chaincodeMap[handler.ChaincodeID.Name].txctx = handler.txCtxs[msg.Txid]
-			theChaincodeSupport.rebootingChaincodes.Unlock()
-			if _, _, err := theChaincodeSupport.Launch(context.Background(), cccid, []byte("")); err != nil {
-				chaincodeLogger.Errorf("sync Reboot chaincode [%s] failed!Delete it!", cccid.Name+"_"+cccid.Version)
-				theChaincodeSupport.Stop(context.Background(), cccid, true)
-				//theChaincodeSupport.rebootingChaincodes.Lock()
-				//delete(theChaincodeSupport.rebootingChaincodes.chaincodeMap, handler.ChaincodeID.Name)
-				//theChaincodeSupport.rebootingChaincodes.Unlock()
-			} else {
-				chaincodeLogger.Warningf("sync Reboot chaincode [%s] success!", handler.ChaincodeID.Name)
-			}
-			//} else {
-			//删除chaincode
-			//chaincodeLogger.Errorf("sync Delete chaincode [%s] because of panic!", cccid.Name+"_"+cccid.Version)
-			//theChaincodeSupport.Stop(context.Background(), cccid, true)
-			//theChaincodeSupport.rebootingChaincodes.Lock()
-			//delete(theChaincodeSupport.rebootingChaincodes.chaincodeMap, handler.ChaincodeID.Name)
-			//theChaincodeSupport.rebootingChaincodes.Unlock()
-			//}
-		}
-	}()
 	handler.nextState <- &nextStateInfo{msg: msg, sendToCC: true, sendSync: true}
 }
 
@@ -497,21 +429,11 @@ func (handler *Handler) serialSend(msg *pb.ChaincodeMessage) error {
 	var err error
 	if err = handler.ChatStream.Send(msg); err != nil {
 		err = fmt.Errorf("[%x]Error sending %s: %s", shorttxid(msg.Txid), msg.Type.String(), err)
-		chaincodeLogger.Errorf("%s", err)
+		chaincodeHandleLogger.Errorf("%s", err)
 		return err
 	}
-	chaincodeLogger.Debugf("Transaction [%s] type [%s] send to docker", shorttxid(msg.Txid), msg.Type.String())
+	chaincodeHandleLogger.Debugf("Transaction [%s] type [%s] send to docker", shorttxid(msg.Txid), msg.Type.String())
 	return nil
-}
-
-func (handler *Handler) waitForKeepaliveTimer() <-chan time.Time {
-	if handler.chaincodeSupport.keepalive > 0 {
-		c := time.After(handler.chaincodeSupport.keepalive)
-		return c
-	}
-	//no one will signal this channel, listner blocks forever
-	c := make(chan time.Time, 1)
-	return c
 }
 
 func shorttxid(txid string) string {
@@ -525,7 +447,7 @@ func shorttxid(txid string) string {
 
 // beforeRegisterEvent is invoked when chaincode tries to register.
 func (handler *Handler) beforeRegisterEvent(e *fsm.Event, state string) {
-	chaincodeLogger.Debugf("enter beforeRegisterEvent")
+	chaincodeHandleLogger.Debugf("enter beforeRegisterEvent")
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
 		e.Cancel(fmt.Errorf("Received unexpected message type"))
@@ -581,317 +503,706 @@ func (handler *Handler) notify(msg *pb.ChaincodeMessage) {
 	defer handler.Unlock()
 	tctx := handler.txCtxs[msg.Txid]
 	if tctx == nil {
-		chaincodeLogger.Debugf("notifier Txid:%x does not exist", shorttxid(msg.Txid))
+		chaincodeHandleLogger.Debugf("notifier Txid:%x does not exist", shorttxid(msg.Txid))
 	} else {
-		chaincodeLogger.Debugf("notifying Txid:%x", shorttxid(msg.Txid))
+		chaincodeHandleLogger.Debugf("notifying Txid:%x", shorttxid(msg.Txid))
 		tctx.responseNotifier <- msg
-
-		// clean up queryIteratorMap
-		// for _, v := range tctx.queryIteratorMap {
-		// 	v.Close()
-		// }
 	}
 }
 
 func (handler *Handler) notifyDuringStartup(val bool) {
-	//if USER_RUNS_CC readyNotify will be nil
 	if handler.readyNotify != nil {
-		chaincodeLogger.Debug("Notifying during startup")
+		chaincodeHandleLogger.Debug("Notifying during startup")
 		handler.readyNotify <- val
 	} else {
-		chaincodeLogger.Debug("nothing to notify (dev mode ?)")
-		//In theory, we don't even need a devmode flag in the peer anymore
-		//as the chaincode is brought up without any context (ledger context
-		//in particular). What this means is we can have - in theory - a nondev
-		//environment where we can attach a chaincode manually. This could be
-		//useful .... but for now lets just be conservative and allow manual
-		//chaincode only in dev mode (ie, peer started with --peer-chaincodedev=true)
+		chaincodeHandleLogger.Debug("nothing to notify (dev mode ?)")
 		if handler.chaincodeSupport.userRunsCC {
 			if val {
-				chaincodeLogger.Debug("sending READY")
+				chaincodeHandleLogger.Debug("sending READY")
 				ccMsg := &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_READY}
 				go handler.triggerNextState(ccMsg, true)
 			} else {
-				chaincodeLogger.Errorf("Error during startup .. not sending READY")
+				chaincodeHandleLogger.Errorf("Error during startup .. not sending READY")
 			}
 		} else {
-			chaincodeLogger.Warningf("trying to manually run chaincode when not in devmode ?")
+			chaincodeHandleLogger.Warningf("trying to manually run chaincode when not in devmode ?")
 		}
 	}
 }
 
-func (handler *Handler) enterBusyState(e *fsm.Event, state string) {
-	chaincodeLogger.Debugf("enterBusyState")
+//enterGetState 处理来自chaincode的GET_STATE消息
+func (handler *Handler) enterGetState(e *fsm.Event, state string) {
+	chaincodeHandleLogger.Debugf("enterGetState++++++++")
 	go func() {
+		var serialSendMsg *pb.ChaincodeMessage
+		defer func() {
+			handler.serialSendAsync(serialSendMsg, nil)
+		}()
 		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
-		if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-			chaincodeLogger.Debugf("[%x]state is %s", shorttxid(msg.Txid), state)
-		}
-		var triggerNextStateMsg *pb.ChaincodeMessage
-		var resTemp []byte
-		var err error
-		defer func() {
-			handler.triggerNextState(triggerNextStateMsg, true)
-		}()
-
-		errHandler := func(payload []byte, errFmt string, errArgs ...interface{}) {
-			chaincodeLogger.Errorf(errFmt, errArgs)
-			triggerNextStateMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
-		}
-
-		if msg.Type.String() == pb.ChaincodeMessage_PUT_STATE.String() {
-			putStateInfo := &pb.PutStateInfo{}
-			unmarshalErr := proto.Unmarshal(msg.Payload, putStateInfo)
-			if unmarshalErr != nil {
-				errHandler([]byte(unmarshalErr.Error()), "[%x]Unable to decipher payload. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_ERROR)
-				return
-			}
-			res.resLocker.Lock()
-			res.tempResult[putStateInfo.Key] = string(putStateInfo.Value)
-			res.singleTxResult[putStateInfo.Key] = string(putStateInfo.Value)
-			res.resLocker.Unlock()
-		} else if msg.Type.String() == pb.ChaincodeMessage_DEL_STATE.String() {
-			// Invoke ledger to delete state
+		if msg.Type.String() == pb.ChaincodeMessage_GET_STATE.String() {
 			key := string(msg.Payload)
+			var resTemp []byte
 			res.resLocker.Lock()
-			res.tempResult[key] = ""
-			res.singleTxResult[key] = ""
+			if v, ok := res.singleTxResult[key]; ok {
+				res.resLocker.Unlock()
+				resTemp, _ := json.Marshal(&v.value)
+				serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: resTemp, Txid: msg.Txid}
+				return
+			} else if v, ok := res.tempResult[key]; ok {
+				res.resLocker.Unlock()
+				resTemp, _ := json.Marshal(&v.value)
+				serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: resTemp, Txid: msg.Txid}
+				return
+			}
 			res.resLocker.Unlock()
-		} else if msg.Type.String() == pb.ChaincodeMessage_DEL_STATEN.String() {
-			keyn := strings.Split(string(msg.Payload), "\n")
-			res.resLocker.Lock()
-			for _, y := range keyn {
-				res.tempResult[y] = ""
-				res.singleTxResult[y] = ""
-			}
-			res.resLocker.Unlock()
-		} else if msg.Type.String() == pb.ChaincodeMessage_INVOKE_CHAINCODE.String() {
-			if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-				chaincodeLogger.Debugf("[%x] C-call-C", shorttxid(msg.Txid))
-			}
-			type InvokeChaincode struct {
-				ChaincodeName    string
-				ChaincodeVersion string
-				Args             [][]byte
-			}
-			var chaincodeSpec InvokeChaincode
-			unmarshalErr := json.Unmarshal(msg.Payload, &chaincodeSpec)
-			if unmarshalErr != nil {
-				errHandler([]byte(unmarshalErr.Error()), "[%x]Unable to decipher payload. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_ERROR)
+			var oldresult string
+			r := worldstate.GetWorldState().Search(key)
+			if r.Err == nil {
+				oldresult = r.Value
+			} else {
+				serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte(fmt.Sprintf("Can't find the key!\n")), Txid: msg.Txid}
 				return
 			}
-
-			// Get the chaincodeID to invoke. The chaincodeID to be called may
-			// contain composite info like "chaincode-name:version/channel-name"
-			// We are not using version now but default to the latest
-
-			cccid := ccprovider.NewCCContext("tjfoc", chaincodeSpec.ChaincodeName, chaincodeSpec.ChaincodeVersion, msg.Txid, theChaincodeSupport.ip, theChaincodeSupport.port, false)
-			canName := cccid.GetCanonicalName()
-			if _, ok := theChaincodeSupport.runningChaincodes.chaincodeMap[canName]; !ok {
-				errHandler([]byte("chaincode is not exist"), "[%x]chaincode is not exist. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_ERROR)
-				return
-			}
-			// TODO: Need to handle timeout correctly
-			timeout := time.Duration(30000) * time.Millisecond
-
-			cMsg := &pb.ChaincodeInput{Args: chaincodeSpec.Args}
-			payload, err := proto.Marshal(cMsg)
-			if err != nil {
-				chaincodeStartLogger.Error(err)
-			}
-			var ccMsg *pb.ChaincodeMessage
-			if len(chaincodeSpec.Args) != 0 {
-				ccMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION, Payload: payload, Txid: msg.Txid}
+			var temp singleValue
+			json.Unmarshal([]byte(oldresult), &temp)
+			if temp.IsSecret {
+				//执行grpc去监督节点请求
+				rrrr := &monitor.TransactionKey{
+					Key:         []byte(key),
+					TxId:        []byte(res.currentTxId),
+					PeerID:      []byte(res.peerID),
+					Secretvalue: temp.Value,
+				}
+				//查询key，第一步获得随机数并且签名
+				for {
+					conn, err := grpc.Dial(res.monitorAddr, grpc.WithInsecure())
+					if err != nil {
+						if conn != nil {
+							conn.Close()
+						}
+						chaincodeHandleLogger.Error("QueryKey connect to monitor error!Error:", err)
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					client := monitor.NewMonitorClient(conn)
+					response, err := client.QueryKey(context.Background(), rrrr)
+					if err != nil || response.RandNum == nil {
+						if conn != nil {
+							conn.Close()
+						}
+						chaincodeHandleLogger.Error("query key error!Error:", err)
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					s, err := res.c.Sign(nil, response.RandNum, nil)
+					if err != nil {
+						chaincodeHandleLogger.Errorf("use privkey for signing failed,error:%s\n", err)
+					}
+					rrrr.RandNum = response.RandNum
+					rrrr.Sign = s
+					if conn != nil {
+						conn.Close()
+					}
+					break
+				}
+				//验证随机数和签名
+				for {
+					conn, err := grpc.Dial(res.monitorAddr, grpc.WithInsecure())
+					if err != nil {
+						if conn != nil {
+							conn.Close()
+						}
+						chaincodeHandleLogger.Error("VerifyKey connect to monitor error!Error:", err)
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					client := monitor.NewMonitorClient(conn)
+					response, err := client.Authentication(context.Background(), rrrr)
+					if err != nil {
+						if conn != nil {
+							conn.Close()
+						}
+						chaincodeHandleLogger.Error("verify key error!Error:", err)
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					if response.Status != nil {
+						chaincodeHandleLogger.Warningf("query key,monitor return error for this key!Key:%s,Error:%s\n", key, response.Status)
+						serialSendMsg = &pb.ChaincodeMessage{
+							Type:    pb.ChaincodeMessage_ERROR,
+							Payload: []byte(fmt.Sprintf("Get secret key from monitor error!Error:%s\n", response.Status)),
+							Txid:    msg.Txid,
+						}
+					} else {
+						chaincodeHandleLogger.Infof("QueryKey success!value:%s\n", response.Value)
+						resTemp, _ = json.Marshal(&singleValue{Value: response.Value, IsSecret: true})
+					}
+					if conn != nil {
+						conn.Close()
+					}
+					break
+				}
 			} else {
-				errHandler([]byte("Invokechaincode args error"), "[%x]Invokechaincode args error. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_ERROR)
-				return
-			}
-			response, execErr := theChaincodeSupport.Execute(context.Background(), cccid, ccMsg, timeout)
-			//payload is marshalled and send to the calling chaincode's shim which unmarshals and
-			//sends it to chaincode
-			resTemp = nil
-			if execErr != nil {
-				err = execErr
-			} else {
-				resTemp, err = proto.Marshal(response)
-			}
-		}
-
-		if err != nil {
-			errHandler([]byte(err.Error()), "[%x]Failed to handle %s. Sending %s", shorttxid(msg.Txid), msg.Type.String(), pb.ChaincodeMessage_ERROR)
-			return
-		}
-
-		// Send response msg back to chaincode.
-		if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-			chaincodeLogger.Debugf("[%x]Completed %s. Sending %s", shorttxid(msg.Txid), msg.Type.String(), pb.ChaincodeMessage_RESPONSE)
-		}
-		triggerNextStateMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: resTemp, Txid: msg.Txid}
-	}()
-}
-
-//afterGetState 处理来自chaincode的GET_STATE消息
-func (handler *Handler) afterGetState(e *fsm.Event, state string) {
-	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
-	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
-		return
-	}
-	chaincodeLogger.Debugf("[%x]Received %s, invoking get state from ledger", shorttxid(msg.Txid), pb.ChaincodeMessage_GET_STATE)
-
-	// Query ledger for state
-	handler.handleGetState(msg)
-}
-
-func (handler *Handler) handleGetState(msg *pb.ChaincodeMessage) {
-	// The defer followed by triggering a go routine dance is needed to ensure that the previous state transition
-	// is completed before the next one is triggered. The previous state transition is deemed complete only when
-	// the afterGetState function is exited. Interesting bug fix!!
-	go func() {
-		// Check if this is the unique state request from this chaincode txid
-		// uniqueReq := handler.createTXIDEntry(msg.Txid)
-		// if !uniqueReq {
-		// 	// Drop this request
-		// 	chaincodeLogger.Error("Another state request pending for this Txid. Cannot process.")
-		// 	return
-		// }
-
-		var serialSendMsg *pb.ChaincodeMessage
-
-		defer func() {
-			// handler.deleteTXIDEntry(msg.Txid)
-			if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-				chaincodeLogger.Debugf("[%x]handleGetState serial send %s",
-					shorttxid(serialSendMsg.Txid), serialSendMsg.Type)
-			}
-			handler.serialSendAsync(serialSendMsg, nil)
-		}()
-
-		key := string(msg.Payload)
-		var resTemp []byte
-		res.resLocker.Lock()
-		if v, ok := res.tempResult[key]; ok {
-			resTemp = []byte(v)
-		} else {
-			result := worldstate.GetWorldState().Search(key)
-			if result.Err == nil {
-				resTemp = []byte(result.Value)
-			} else {
-				chaincodeLogger.Errorf("can't search %s ,error %s", key, result.Err)
-			}
-		}
-		res.resLocker.Unlock()
-		if resTemp == nil {
-			//The state object being requested does not exist
-			chaincodeLogger.Debugf("[%x]No state associated with key: %s. Sending %s with an empty payload",
-				shorttxid(msg.Txid), key, pb.ChaincodeMessage_RESPONSE)
-			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: resTemp, Txid: msg.Txid}
-		} else {
-			// Send response msg back to chaincode. GetState will not trigger event
-			if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-				chaincodeLogger.Debugf("[%x]Got state. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_RESPONSE)
+				resTemp = []byte(oldresult)
 			}
 			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: resTemp, Txid: msg.Txid}
 		}
-
 	}()
 }
 
-//afterGetStaten 处理来自chaincode的GET_STATEN消息
-func (handler *Handler) afterGetStaten(e *fsm.Event, state string) {
-	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
-	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
-		return
-	}
-	chaincodeLogger.Debugf("[%x]Received %s, invoking get state from ledger", shorttxid(msg.Txid), pb.ChaincodeMessage_GET_STATE)
-
-	// Query ledger for state
-	handler.handleGetStaten(msg)
+type ReturnKv struct {
+	Kv map[string][]byte
 }
 
-func (handler *Handler) handleGetStaten(msg *pb.ChaincodeMessage) {
+//enterGetStaten 处理来自chaincode的GET_STATEN消息
+func (handler *Handler) enterGetStaten(e *fsm.Event, state string) {
+	chaincodeHandleLogger.Debugf("enterGetStaten++++++++")
 	go func() {
 		var serialSendMsg *pb.ChaincodeMessage
 		defer func() {
-			if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-				chaincodeLogger.Debugf("[%x]handleGetState serial send %s",
-					shorttxid(serialSendMsg.Txid), serialSendMsg.Type)
-			}
 			handler.serialSendAsync(serialSendMsg, nil)
 		}()
+		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
 		if msg.Type.String() == pb.ChaincodeMessage_GET_STATEN.String() {
 			keyn := strings.Split(string(msg.Payload), "\n")
-			//首先读取worldstate,之后拿缓存中数据更新读取到的map
-			type ReturnKV struct {
-				Kv map[string]string
+			tempRes := &ReturnKv{
+				Kv: make(map[string][]byte),
 			}
-			tempRes := &ReturnKV{Kv: make(map[string]string)}
-			for _, v := range worldstate.GetWorldState().Searchn(keyn) {
-				tempRes.Kv[v.Key] = v.Value
-			}
-			//读取缓存
-			res.resLocker.Lock()
-			for _, y := range keyn {
-				v, ok := res.tempResult[y]
-				if ok {
-					tempRes.Kv[y] = v
+			for _, key := range keyn {
+				res.resLocker.Lock()
+				if v, ok := res.singleTxResult[key]; ok {
+					res.resLocker.Unlock()
+					rrrr, _ := json.Marshal(&v.value)
+					tempRes.Kv[key] = rrrr
+					continue
+				} else if v, ok := res.tempResult[key]; ok {
+					res.resLocker.Unlock()
+					rrrr, _ := json.Marshal(&v.value)
+					tempRes.Kv[key] = rrrr
+					continue
+				}
+				res.resLocker.Unlock()
+				var oldresult string
+				r := worldstate.GetWorldState().Search(key)
+				if r.Err == nil {
+					oldresult = r.Value
+				} else {
+					tempRes.Kv[key] = nil
+					continue
+				}
+				var temp singleValue
+				json.Unmarshal([]byte(oldresult), &temp)
+				if temp.IsSecret {
+					//执行grpc去监督节点请求
+					rrrr := &monitor.TransactionKey{
+						Key:         []byte(key),
+						TxId:        []byte(res.currentTxId),
+						PeerID:      []byte(res.peerID),
+						Secretvalue: temp.Value,
+					}
+					//查询key，第一步获得随机数并且签名
+					for {
+						conn, err := grpc.Dial(res.monitorAddr, grpc.WithInsecure())
+						if err != nil {
+							if conn != nil {
+								conn.Close()
+							}
+							chaincodeHandleLogger.Error("QueryKeyn connect to monitor error!Error:", err)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						client := monitor.NewMonitorClient(conn)
+						response, err := client.QueryKey(context.Background(), rrrr)
+						if err != nil || response.RandNum == nil {
+							if conn != nil {
+								conn.Close()
+							}
+							chaincodeHandleLogger.Error("query keyn error!Error:", err)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						s, err := res.c.Sign(nil, response.RandNum, nil)
+						if err != nil {
+							chaincodeHandleLogger.Errorf("use privkey for signing failed,error:%s\n", err)
+						}
+						rrrr.RandNum = response.RandNum
+						rrrr.Sign = s
+						if conn != nil {
+							conn.Close()
+						}
+						break
+					}
+					//验证随机数和签名
+					for {
+						conn, err := grpc.Dial(res.monitorAddr, grpc.WithInsecure())
+						if err != nil {
+							if conn != nil {
+								conn.Close()
+							}
+							chaincodeHandleLogger.Error("VerifyKeyn connect to monitor error!Error:", err)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						client := monitor.NewMonitorClient(conn)
+						response, err := client.Authentication(context.Background(), rrrr)
+						if err != nil {
+							if conn != nil {
+								conn.Close()
+							}
+							chaincodeHandleLogger.Error("verify keyn error!Error:", err)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						if response.Status == nil {
+							resTemp, _ := json.Marshal(&singleValue{Value: response.Value, IsSecret: true})
+							tempRes.Kv[key] = resTemp
+						} else {
+							chaincodeHandleLogger.Warningf("query keyn,monitor return error for this key!Key:%s,Error:%s", key, response.Status)
+						}
+						if conn != nil {
+							conn.Close()
+						}
+						break
+					}
+				} else {
+					tempRes.Kv[key] = []byte(oldresult)
 				}
 			}
-			res.resLocker.Unlock()
 			tempdata, _ := json.Marshal(tempRes)
-			chaincodeLogger.Debugf("[%x]No state associated with keyn: %s. Sending %s with an empty payload", shorttxid(msg.Txid), keyn, pb.ChaincodeMessage_RESPONSE)
 			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: tempdata, Txid: msg.Txid}
 		}
 	}()
 }
 
 func (handler *Handler) enterGetStateByPrefix(e *fsm.Event, state string) {
-
-	chaincodeLogger.Debugf("enterGetStateByPrefix++++++++")
+	chaincodeHandleLogger.Debugf("enterGetStateByPrefix++++++++")
 	go func() {
 		var serialSendMsg *pb.ChaincodeMessage
 		defer func() {
-			if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-				chaincodeLogger.Debugf("[%x]handleGetState serial send %s",
-					shorttxid(serialSendMsg.Txid), serialSendMsg.Type)
-			}
 			handler.serialSendAsync(serialSendMsg, nil)
 		}()
 		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
 		if msg.Type.String() == pb.ChaincodeMessage_GET_STATE_BY_PREFIX.String() {
-			//先从worldstate查询,之后在缓存中得到最新的结果
-			key := string(msg.Payload)
-			var err error
-			type ReturnKV struct {
-				Kv map[string]string
-			}
-			tempRes := &ReturnKV{Kv: make(map[string]string)}
-
-			tempRes.Kv, err = worldstate.GetWorldState().SearchPrefix(key)
-
+			//找到所有符合的key，存入keyn中
+			keyn := make([]string, 0)
+			r, err := worldstate.GetWorldState().SearchPrefix(string(msg.Payload))
 			if err == nil {
-				//The state object being requested does not exist
-				regKey := key + "*"
-				res.resLocker.Lock()
-				for k, v := range res.tempResult {
-					if ok, _ := regexp.Match(regKey, []byte(k)); ok {
-						tempRes.Kv[k] = v
+				for k, _ := range r {
+					keyn = append(keyn, k)
+				}
+			}
+			regkey := string(msg.Payload) + "*"
+			res.resLocker.Lock()
+			for k, _ := range res.tempResult {
+				if ok, _ := regexp.Match(regkey, []byte(k)); ok {
+					isFind := false
+					for _, existkey := range keyn {
+						if existkey == k {
+							isFind = true
+							break
+						}
+					}
+					if !isFind {
+						keyn = append(keyn, k)
 					}
 				}
-				res.resLocker.Unlock()
-				tempData, _ := json.Marshal(tempRes)
-				chaincodeLogger.Debugf("[%x]No state associated with key: %s. Sending %s with an empty payload",
-					shorttxid(msg.Txid), key, pb.ChaincodeMessage_RESPONSE)
-				serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: tempData, Txid: msg.Txid}
-			} else {
-				// Send response msg back to chaincode. GetState will not trigger event
-				if chaincodeLogger.IsEnabledFor(logging.DEBUG) {
-					chaincodeLogger.Debugf("[%x]Got state. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_RESPONSE)
+			}
+			for k, _ := range res.singleTxResult {
+				if ok, _ := regexp.Match(regkey, []byte(k)); ok {
+					isFind := false
+					for _, existkey := range keyn {
+						if existkey == k {
+							isFind = true
+							break
+						}
+					}
+					if !isFind {
+						keyn = append(keyn, k)
+					}
 				}
-				serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: []byte(fmt.Sprintf("%s\n", err)), Txid: msg.Txid}
+			}
+			res.resLocker.Unlock()
+			tempRes := &ReturnKv{
+				Kv: make(map[string][]byte),
+			}
+			for _, key := range keyn {
+				res.resLocker.Lock()
+				if v, ok := res.singleTxResult[key]; ok {
+					res.resLocker.Unlock()
+					rrrr, _ := json.Marshal(&v.value)
+					tempRes.Kv[key] = rrrr
+					continue
+				} else if v, ok := res.tempResult[key]; ok {
+					res.resLocker.Unlock()
+					rrrr, _ := json.Marshal(&v.value)
+					tempRes.Kv[key] = rrrr
+					continue
+				}
+				res.resLocker.Unlock()
+				var oldresult string
+				r := worldstate.GetWorldState().Search(key)
+				if r.Err == nil {
+					oldresult = r.Value
+				} else {
+					tempRes.Kv[key] = nil
+					continue
+				}
+				var temp singleValue
+				json.Unmarshal([]byte(oldresult), &temp)
+				if temp.IsSecret {
+					//执行grpc去监督节点请求
+					rrrr := &monitor.TransactionKey{
+						Key:         []byte(key),
+						TxId:        []byte(res.currentTxId),
+						PeerID:      []byte(res.peerID),
+						Secretvalue: temp.Value,
+					}
+					//查询key，第一步获得随机数并且签名
+					for {
+						conn, err := grpc.Dial(res.monitorAddr, grpc.WithInsecure())
+						if err != nil {
+							if conn != nil {
+								conn.Close()
+							}
+							chaincodeHandleLogger.Error("QueryKeyByPrefix connect to monitor error!Error:", err)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						client := monitor.NewMonitorClient(conn)
+						response, err := client.QueryKey(context.Background(), rrrr)
+						if err != nil {
+							if conn != nil {
+								conn.Close()
+							}
+							chaincodeHandleLogger.Error("query key by prefix error!Error:", err)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						s, _ := res.c.Sign(nil, response.RandNum, nil)
+						rrrr.RandNum = response.RandNum
+						rrrr.Sign = s
+						if conn != nil {
+							conn.Close()
+						}
+						break
+					}
+					//验证随机数和签名
+					for {
+						conn, err := grpc.Dial(res.monitorAddr, grpc.WithInsecure())
+						if err != nil {
+							if conn != nil {
+								conn.Close()
+							}
+							chaincodeHandleLogger.Error("VerifyKeyByPrefix connect to monitor error!Error:", err)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						client := monitor.NewMonitorClient(conn)
+						response, err := client.Authentication(context.Background(), rrrr)
+						if err != nil {
+							if conn != nil {
+								conn.Close()
+							}
+							chaincodeHandleLogger.Error("verify key by prefix error!Error:", err)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						if response.Status == nil {
+							resTemp, _ := json.Marshal(&singleValue{Value: response.Value, IsSecret: true})
+							tempRes.Kv[key] = resTemp
+						} else {
+							chaincodeHandleLogger.Warningf("query key by prefix,monitor return error for this key!Key:%s,Error:%s", key, response.Status)
+						}
+						if conn != nil {
+							conn.Close()
+						}
+						break
+					}
+				} else {
+					tempRes.Kv[key] = []byte(oldresult)
+				}
+			}
+			tempdata, _ := json.Marshal(tempRes)
+			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: tempdata, Txid: msg.Txid}
+		}
+	}()
+}
+
+func (handler *Handler) enterPutState(e *fsm.Event, state string) {
+	chaincodeHandleLogger.Debugf("enterPutState++++++++")
+	go func() {
+		var serialSendMsg *pb.ChaincodeMessage
+		defer func() {
+			handler.serialSendAsync(serialSendMsg, nil)
+		}()
+		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
+		if msg.Type.String() == pb.ChaincodeMessage_PUT_STATE.String() {
+			putStateInfo := &pb.PutStateInfo{}
+			proto.Unmarshal(msg.Payload, putStateInfo)
+			var rrrr singleValue
+			json.Unmarshal(putStateInfo.Value, &rrrr)
+			res.resLocker.Lock()
+			oldstate := checkKeyIsSecret(putStateInfo.Key)
+			tempResultDuiChen := false
+			v, ok := res.tempResult[putStateInfo.Key]
+			if ok {
+				tempResultDuiChen = v.duiChen
+			}
+			res.singleTxResult[putStateInfo.Key] = &singleResult{
+				value: singleValue{
+					Value:    rrrr.Value,
+					IsSecret: oldstate,
+				},
+				duiChen: (oldstate || res.currentTxIsSecret || tempResultDuiChen),
+				tongTai: oldstate,
+				action:  worldstate.PUTACTION,
+			}
+			res.resLocker.Unlock()
+			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: nil, Txid: msg.Txid}
+		}
+	}()
+}
+
+func (handler *Handler) enterDeleteState(e *fsm.Event, state string) {
+	chaincodeHandleLogger.Debugf("enterDeleteState++++++++")
+	go func() {
+		var serialSendMsg *pb.ChaincodeMessage
+		defer func() {
+			handler.serialSendAsync(serialSendMsg, nil)
+		}()
+		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
+		if msg.Type.String() == pb.ChaincodeMessage_DEL_STATE.String() {
+			key := string(msg.Payload)
+			res.resLocker.Lock()
+			res.singleTxResult[key] = &singleResult{
+				value: singleValue{
+					Value:    nil,
+					IsSecret: false,
+				},
+				duiChen: false,
+				tongTai: false,
+				action:  worldstate.DELACTION,
+			}
+			res.resLocker.Unlock()
+			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: nil, Txid: msg.Txid}
+		}
+	}()
+}
+
+func (handler *Handler) enterDeleteStaten(e *fsm.Event, state string) {
+	chaincodeHandleLogger.Debugf("enterDeleteStaten++++++++")
+	go func() {
+		var serialSendMsg *pb.ChaincodeMessage
+		defer func() {
+			handler.serialSendAsync(serialSendMsg, nil)
+		}()
+		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
+		if msg.Type.String() == pb.ChaincodeMessage_DEL_STATEN.String() {
+			keyn := strings.Split(string(msg.Payload), "\n")
+			res.resLocker.Lock()
+			for _, key := range keyn {
+				res.singleTxResult[key] = &singleResult{
+					value: singleValue{
+						Value:    nil,
+						IsSecret: false,
+					},
+					duiChen: false,
+					tongTai: false,
+					action:  worldstate.DELACTION,
+				}
+			}
+			res.resLocker.Unlock()
+			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: nil, Txid: msg.Txid}
+		}
+	}()
+}
+
+func (handler *Handler) enterRequireCrypt(e *fsm.Event, state string) {
+	chaincodeHandleLogger.Debugf("enterRequireCrypt++++++++")
+	go func() {
+		var serialSendMsg *pb.ChaincodeMessage
+		defer func() {
+			handler.serialSendAsync(serialSendMsg, nil)
+		}()
+		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
+		if msg.Type.String() == pb.ChaincodeMessage_REQUIRE_CRYPT.String() {
+			num, e := strconv.ParseInt(string(msg.Payload), 10, 64)
+			if e != nil {
+				chaincodeHandleLogger.Error("strconv from string to int64 error!error:", e)
+				serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte(fmt.Sprintf("strconv from string to int64 error!error:%s\n", e)), Txid: msg.Txid}
+				return
+			}
+			rrrr := &monitor.CryptNumber{
+				TxId:  []byte(msg.Txid),
+				Value: num,
+			}
+			for {
+				//请求监督节点进行加密
+				conn, err := grpc.Dial(res.monitorAddr, grpc.WithInsecure())
+				if err != nil {
+					if conn != nil {
+						conn.Close()
+					}
+					chaincodeHandleLogger.Error("RequireCrypt connect to monitor error!Error:", err)
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				client := monitor.NewMonitorClient(conn)
+				response, err := client.RequireCrypt(context.Background(), rrrr)
+				if err != nil {
+					if conn != nil {
+						conn.Close()
+					}
+					chaincodeHandleLogger.Error("RequireCrypt return response error!error:", err)
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				//成功获得加密数据
+				serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: response.Svalue, Txid: msg.Txid}
+				if conn != nil {
+					conn.Close()
+				}
+				break
 			}
 		}
-
 	}()
+}
+
+func (handler *Handler) enterRequireCompare(e *fsm.Event, state string) {
+	chaincodeHandleLogger.Debugf("enterRequireCompare++++++++")
+	go func() {
+		var serialSendMsg *pb.ChaincodeMessage
+		defer func() {
+			handler.serialSendAsync(serialSendMsg, nil)
+		}()
+		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
+		if msg.Type.String() == pb.ChaincodeMessage_REQUIRE_COMPARE.String() {
+			type AAA struct {
+				Originvalue []byte
+				Dealvalue   int64
+			}
+			var aaa AAA
+			json.Unmarshal(msg.Payload, &aaa)
+			rrrr := &monitor.CompareNumber{
+				TxId:   []byte(msg.Txid),
+				Svalue: aaa.Originvalue,
+				Value:  aaa.Dealvalue,
+			}
+			for {
+				//请求监督节点进行比较
+				conn, err := grpc.Dial(res.monitorAddr, grpc.WithInsecure())
+				if err != nil {
+					if conn != nil {
+						conn.Close()
+					}
+					chaincodeHandleLogger.Error("RequireCompare connect to monitor error!Error:", err)
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				client := monitor.NewMonitorClient(conn)
+				response, err := client.RequireCompare(context.Background(), rrrr)
+				if err != nil {
+					if conn != nil {
+						conn.Close()
+					}
+					chaincodeHandleLogger.Error("RequireCompare return response error!error:", err)
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				//成功获得比较结果
+				serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: []byte(strconv.FormatInt(response.Result, 10)), Txid: msg.Txid}
+				if conn != nil {
+					conn.Close()
+				}
+				break
+			}
+		}
+	}()
+
+}
+
+/*
+func (handler *Handler) enterInvokeChaincode(e *fsm.Event, state string) {
+	chaincodeHandleLogger.Debugf("enterInvokeChaincode++++++++")
+	go func() {
+		var serialSendMsg *pb.ChaincodeMessage
+		defer func() {
+			handler.serialSendAsync(serialSendMsg, nil)
+		}()
+		msg, _ := e.Args[0].(*pb.ChaincodeMessage)
+		if msg.Type.String() == pb.ChaincodeMessage_INVOKE_CHAINCODE.String() {
+				type InvokeChaincode struct {
+					ChaincodeName    string
+					ChaincodeVersion string
+					Args             [][]byte
+				}
+				var chaincodeSpec InvokeChaincode
+				err := json.Unmarshal(msg.Payload, &chaincodeSpec)
+				if err != nil {
+					serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte("unmarshal json error!"), Txid: msg.Txid}
+					chaincodeHandleLogger.Error("unmarshal json error!")
+					return
+				}
+				//创建一笔新的交易
+				cccid := ccprovider.NewCCContext("tjfoc", chaincodeSpec.ChaincodeName, chaincodeSpec.ChaincodeVersion, msg.Txid, theChaincodeSupport.ip, theChaincodeSupport.port, false)
+				canName := cccid.GetCanonicalName()
+				if _, ok := theChaincodeSupport.runningChaincodes.chaincodeMap[canName]; !ok {
+					serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte(fmt.Sprintf("Required chaincode [%s] does not exist!\n", canName)), Txid: msg.Txid}
+					chaincodeHandleLogger.Errorf("Required chaincode [%s] does not exist!\n", canName)
+					return
+				}
+				//超时时间
+				timeout := time.Duration(30) * time.Second
+				cMsg := &pb.ChaincodeInput{Args: chaincodeSpec.Args}
+				payload, err := proto.Marshal(cMsg)
+				if err != nil {
+					chaincodeHandleLogger.Error("marshal pb error!")
+					serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte("marshal pb error!"), Txid: msg.Txid}
+					return
+				}
+				var ccMsg *pb.ChaincodeMessage
+				if len(chaincodeSpec.Args) != 0 {
+					ccMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION, Payload: payload, Txid: msg.Txid}
+				} else {
+					chaincodeHandleLogger.Error("InvokeChaincode args error!")
+					serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte("InvokeChaincode args error!"), Txid: msg.Txid}
+					return
+				}
+				//执行交易
+				response, execErr := theChaincodeSupport.Execute(context.Background(), cccid, ccMsg, timeout)
+				if response == nil {
+					//超时
+					chaincodeHandleLogger.Error("InvokeChaincode timeout!")
+					serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte("InvokeChaincode timeout!"), Txid: msg.Txid}
+					return
+				} else if execErr != nil {
+					//系统错误
+					chaincodeHandleLogger.Error("InvokeChaincode system error!Error:", execErr)
+					serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte(fmt.Sprintf("InvokeChaincode system error!Error:%s\n", execErr)), Txid: msg.Txid}
+					return
+				} else {
+					//正常
+					resTemp, err := proto.Marshal(response)
+					if err != nil {
+						chaincodeHandleLogger.Error("marshal pb error!")
+						serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte("marshal pb error!"), Txid: msg.Txid}
+						return
+					}
+					serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: resTemp, Txid: msg.Txid}
+				}
+		}
+	}()
+}
+*/
+func checkKeyIsSecret(key string) bool {
+	if v, ok := res.tempResult[key]; ok {
+		return v.value.IsSecret
+	}
+	r := worldstate.GetWorldState().Search(key)
+	if r.Err == nil {
+		var temp singleValue
+		json.Unmarshal([]byte(r.Value), &temp)
+		return temp.IsSecret
+	}
+	return false
 }

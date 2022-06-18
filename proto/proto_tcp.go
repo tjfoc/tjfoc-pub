@@ -136,6 +136,7 @@ func (t *TcpSp) Run() error {
 	if err != nil {
 		return err
 	}
+	logger.Infof("tcp server startup %s", t.addr)
 	for {
 		if con, err := lis.Accept(); err != nil {
 			lis.Close()

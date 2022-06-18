@@ -35,6 +35,7 @@ func packageShim() {
 	copydir.CopyDir(Gopath+"/src/github.com/tjfoc/tjfoc/vendor", Gopath+"/src/github.com/tjfoc/tjfoc/tools/createdocker/tjfoc/tjfoc/vendor")
 	copydir.CopyDir(Gopath+"/src/github.com/tjfoc/tjfoc/protos", Gopath+"/src/github.com/tjfoc/tjfoc/tools/createdocker/tjfoc/tjfoc/protos")
 	copydir.CopyDir(Gopath+"/src/github.com/tjfoc/gmsm", Gopath+"/src/github.com/tjfoc/tjfoc/tools/createdocker/tjfoc/gmsm")
+	copydir.CopyDir(Gopath+"/src/github.com/tjfoc/tjfoc/core/he", Gopath+"/src/github.com/tjfoc/tjfoc/tools/createdocker/tjfoc/tjfoc/core/he")
 	os.RemoveAll(Gopath + "/src/github.com/tjfoc/tjfoc/tools/createdocker/tjfoc/tjfoc/protos/raft")
 	zip.Tar(Gopath+"/src/github.com/tjfoc/tjfoc/tools/createdocker/tjfoc", "../createdocker/tjfoc.tar.gz", false)
 }
@@ -42,7 +43,7 @@ func packageShim() {
 func main() {
 	Gopath = os.Getenv("GOPATH")
 	if Gopath == "" {
-		fmt.Errorf("GOPATH is not set, please checkout $GOPATH!")
+		fmt.Println("GOPATH is not set, please checkout $GOPATH!")
 		return
 	}
 	packageShim()

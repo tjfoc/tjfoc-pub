@@ -35,42 +35,42 @@ import (
 	"github.com/tjfoc/tjfoc/core/common/ccprovider"
 	"github.com/tjfoc/tjfoc/core/common/flogging"
 	"github.com/tjfoc/tjfoc/core/container/util"
+	"github.com/tjfoc/tjfoc/core/crypt"
 	pb "github.com/tjfoc/tjfoc/protos/chaincode"
 )
 
 var chaincodeStartLogger = flogging.MustGetLogger("chaincode_start")
 
-type result struct {
-	lastBlockTxFinished chan bool         //用来事件触发与阻塞，上一个block的所有交易没有执行完，下一个block的交易要等待
-	tempResult          map[string]string //所有交易结果
-	singleTxResult      map[string]string //当前正在执行交易的结果
-	index               uint64
-	wshash              string
-	resLocker           sync.Mutex
+type singleValue struct {
+	Value    []byte
+	IsSecret bool
+}
+type singleResult struct {
+	value   singleValue
+	duiChen bool  //该值是否需要进行对称密钥加密
+	tongTai bool  //如果需要对称密钥加密，是否需要先进行同态解密
+	action  int32 //导致该结果改变的动作
 }
 
-const (
-	CCSuccess = uint8(1)
-	CCError   = uint8(2)
-	CCTimeout = uint8(3)
-)
+type result struct {
+	c                 crypt.Crypto
+	peerID            string
+	monitorAddr       string
+	tempResult        map[string]*singleResult //所有交易结果
+	singleTxResult    map[string]*singleResult //当前正在执行交易的结果
+	resLocker         sync.Mutex
+	currentTxIsSecret bool
+	currentTxId       string
+}
 
-type ccResult struct {
-	Status    uint8
-	Message   string
-	ChangedKv map[string]string
-	Response  []byte
+func (r *result) SetAttribute(id string, cc crypt.Crypto) {
+	r.peerID = id
+	r.c = cc
 }
 
 var res *result
 
-func initRes() {
-	res = new(result)
-	res.lastBlockTxFinished = make(chan bool, 10)
-	res.lastBlockTxFinished <- true
-	res.tempResult = make(map[string]string)
-	res.singleTxResult = make(map[string]string)
-	//compiled.Start()
+func startDocker() {
 	if !viper.GetBool("Docker.Enable") {
 		return
 	}
@@ -143,7 +143,7 @@ func chaincodeNormalTx(name string, version string, args [][]byte, txID string) 
 	canName := cccid.GetCanonicalName()
 	if _, ok := theChaincodeSupport.runningChaincodes.chaincodeMap[canName]; !ok {
 		chaincodeStartLogger.Errorf("chaincode [%s] doesn't exist!", canName)
-		temp := &ccResult{Status: CCError, Message: fmt.Sprintf("Transaction excute failed!chaincode [%s] doesn't exist!", cccid.Name+"_"+cccid.Version), ChangedKv: nil}
+		temp := &ccResult{Status: CCError, Message: fmt.Sprintf("Transaction excute failed!chaincode [%s] doesn't exist!", cccid.Name+"_"+cccid.Version), ChangedKv: nil, Response: nil}
 		resB, _ := json.Marshal(temp)
 		return string(resB)
 	}
@@ -158,39 +158,61 @@ func chaincodeNormalTx(name string, version string, args [][]byte, txID string) 
 	} else {
 		ccMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION, Payload: payload, Txid: txID}
 	}
+	theChaincodeSupport.currentTxContent = ccMsg
 	resp, err := theChaincodeSupport.Execute(context.Background(), cccid, ccMsg, time.Duration(30)*time.Second)
+	theChaincodeSupport.currentTxContent = nil
 	if resp == nil {
-		//if _, ok := theChaincodeSupport.runningChaincodes.chaincodeMap[canName]; ok {
 		//超时
-		chaincodeStartLogger.Error("Timeout!")
+		chaincodeStartLogger.Error("normal tx Timeout!")
 		temp := &ccResult{Status: CCTimeout, Message: "Transaction excute timeout!", ChangedKv: nil, Response: nil}
 		resB, _ := json.Marshal(temp)
 		return string(resB)
-		//} else {
-		//合约出问题发生panic等错误，被干掉了
-		//chaincodeStartLogger.Error("Chaincode code error!")
-		//temp := &ccResult{Status: CCTimeout, Message: "chaincode runtime error,panic!", ChangedKv: nil, Response: nil}
-		//resB, _ := json.Marshal(temp)
-		//return string(resB)
-		//}
 	} else if err != nil {
 		//系统出错
-		chaincodeStartLogger.Errorf("System Error:%s", err)
+		chaincodeStartLogger.Errorf("normal tx System Error:%s", err)
 		temp := &ccResult{Status: CCError, Message: fmt.Sprintf("Transaction excute failed!System Error!"), ChangedKv: nil, Response: nil}
 		resB, _ := json.Marshal(temp)
 		return string(resB)
 	} else {
 		//正常
-		chaincodeStartLogger.Debug("Transaction excute success!")
-		temp := &ccResult{Status: CCSuccess, Message: "Transaction excute success!", ChangedKv: res.singleTxResult, Response: resp.Payload}
+		chaincodeStartLogger.Info("Normal Transaction excute success!")
+		temp := &ccResult{Status: CCSuccess, Message: "Transaction excute success!", ChangedKv: nil, Response: resp.Payload}
 		resB, _ := json.Marshal(temp)
 		return string(resB)
 	}
-	// //未知情况
-	// chaincodeStartLogger.Error("System Unknow Error!")
-	// temp := &ccResult{Status: CCError, Message: "Unkonw Error!", ChangedKv: nil, Response: nil}
-	// resB, _ := json.Marshal(temp)
-	// return string(resB)
+}
+
+func chaincodeSecretTx(name string, version string, args [][]byte, txID string) {
+	cccid := ccprovider.NewCCContext("tjfoc", name, version, txID, theChaincodeSupport.ip, theChaincodeSupport.port, false)
+	canName := cccid.GetCanonicalName()
+	if _, ok := theChaincodeSupport.runningChaincodes.chaincodeMap[canName]; !ok {
+		chaincodeStartLogger.Errorf("chaincode [%s] doesn't exist!", canName)
+		return
+	}
+	cMsg := &pb.ChaincodeInput{Args: args}
+	payload, err := proto.Marshal(cMsg)
+	if err != nil {
+		chaincodeStartLogger.Error(err)
+	}
+	var ccMsg *pb.ChaincodeMessage
+	if len(args) != 0 && (string(args[0]) == "init" || string(args[0]) == "Init") {
+		ccMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_INIT, Payload: payload, Txid: txID}
+	} else {
+		ccMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION, Payload: payload, Txid: txID}
+	}
+	theChaincodeSupport.currentTxContent = ccMsg
+	resp, err := theChaincodeSupport.Execute(context.Background(), cccid, ccMsg, time.Duration(30)*time.Second)
+	theChaincodeSupport.currentTxContent = nil
+	if resp == nil {
+		//超时
+		chaincodeStartLogger.Error("secret tx Timeout!")
+	} else if err != nil {
+		//系统出错
+		chaincodeStartLogger.Errorf("secret tx System Error:%s", err)
+	} else {
+		//正常
+		chaincodeStartLogger.Info("Secret Transaction excute success!")
+	}
 }
 
 // chaincodeSpecialTxCreate 处理安装chaincode容器的交易
@@ -212,12 +234,12 @@ func chaincodeSpecialTxCreate(chaincodeName string, version string, txID string,
 		return string(resB)
 	}
 	chaincodeStartLogger.Infof("Install chaincode [%s] success!\n", canName)
-	res.resLocker.Lock()
+	//res.resLocker.Lock()
 	//name := "chaincodename_" + chaincodeName
 	//res.tempResult[name] = sign
 	//res.singleTxResult[name] = sign
-	res.resLocker.Unlock()
-	temp := &ccResult{Status: CCSuccess, Message: fmt.Sprintf("Install chaincode [%s] success!", cccid.Name+"_"+cccid.Version), ChangedKv: res.singleTxResult, Response: nil}
+	//res.resLocker.Unlock()
+	temp := &ccResult{Status: CCSuccess, Message: fmt.Sprintf("Install chaincode [%s] success!", cccid.Name+"_"+cccid.Version), ChangedKv: nil, Response: nil}
 	resB, _ := json.Marshal(temp)
 	return string(resB)
 }
@@ -288,9 +310,8 @@ func getContainerNameFromImageName(imageName string) (string, string, string, st
 		return chaincodeName, chaincodeVersion, ip, port
 	}
 	return "", "", "", ""
-
 }
 func getImageNameFromContainerName(containerName string) string {
-	imageName := strings.ToLower(fmt.Sprintf("%s-%s", containerName, hex.EncodeToString([]byte(containerName))))
+	imageName := fmt.Sprintf("%s-%s", containerName, hex.EncodeToString([]byte(containerName)))
 	return imageName
 }

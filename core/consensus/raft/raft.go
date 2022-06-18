@@ -91,7 +91,7 @@ func NewRaft(model int, block interface{}, blockchain blockchain.BlockChain, sp 
 		}
 	}
 
-	raft.cmtlog = newCommitLog(block, commitFun)
+	raft.commit = newCommit(block, commitFun)
 	raft.log = append(raft.log, logEntry{index: 0, term: 0})
 	sp.RegisterFunc(0, raftTCP, raft.callbackFunc)
 	localid, _ := miscellaneous.GenHash(md5.New(), []byte(peerConofig.Self.Id))
@@ -129,9 +129,10 @@ func NewRaft(model int, block interface{}, blockchain blockchain.BlockChain, sp 
 
 //日志条目
 type logEntry struct {
-	index uint64 //索引
-	term  uint64 //任期
-	data  []byte //内容
+	index  uint64 //索引
+	term   uint64 //任期
+	data   []byte //内容,如果为快照，值为节点信息
+	height uint64 //高度，快照使用
 }
 
 type raft struct {
@@ -159,7 +160,7 @@ type raft struct {
 
 	sp         p.SP
 	blockChain blockchain.BlockChain
-	cmtlog     *commitLog //提交日志
+	commit     *commit //提交日志
 
 	heartbeatCh chan bool        //接收心跳
 	breakCh     chan int         //退出通道
@@ -188,11 +189,11 @@ func (r *raft) run() {
 	logger.Infof("raft startup")
 	r.initConfig()
 	go r.messageProcess()
-	go r.cmtlog.commitProcess()
+	go r.commit.commitProcess()
 
 	logger.Infof("===== peers list =====")
 	for _, peer := range r.peers {
-		logger.Infof("run peerProcess %s", peer.name)
+		logger.Infof("run peerProcess %s id:%x", peer.name, peer.hashid)
 		go peer.peerProcess()
 	}
 	for {
@@ -283,7 +284,7 @@ func (r *raft) runCandidate() {
 		case <-r.heartbeatCh:
 			logger.Infof("ignore heartbeat")
 		case <-time.After(time.Duration(votetimeout) * time.Millisecond):
-			logger.Infof("timeout, exit candidate")
+			logger.Infof("timeout [%dms], exit candidate", votetimeout)
 			return
 		}
 	}
@@ -291,6 +292,15 @@ func (r *raft) runCandidate() {
 
 func (r *raft) runLeader() {
 	logger.Infof("runLeader term %d", r.currentTerm)
+	//更新 follow的高度
+	if r.getLastIndex() == 0 {
+		bh := r.getBlockHeight(0)
+		if bh > 1 {
+			logdata := append(miscellaneous.E32func(3), miscellaneous.E64func(bh-1)...)
+			r.log = append(r.log, logEntry{index: r.getLastIndex() + 1, term: r.currentTerm, data: logdata})
+			logger.Infof("leader append update threshold log term:%d, lastIndex:%d,threshold:%d", r.currentTerm, r.getLastIndex(), (bh - 1))
+		}
+	}
 	// r.heartBeat()
 	r.notifyMessage(nil, heartBeat, nil)
 	for {
@@ -304,8 +314,8 @@ func (r *raft) runLeader() {
 			logger.Infof("quit raft membership, exit leader")
 			return
 		case <-time.After(time.Duration(heartBeatout) * time.Millisecond):
-			logger.Debugf("-------------------------------------------")
-			logger.Debugf("heartBeat timeout begin")
+			logger.Debugf("-----------------hbeat--------------------------")
+			logger.Debugf("heartBeat timeout [%dms] begin", heartBeatout)
 			r.notifyMessage(nil, leaderCheck, nil)
 			r.notifyMessage(nil, heartBeat, nil)
 			logger.Debugf("heartBeat timeout end")
@@ -317,12 +327,12 @@ func (r *raft) runLeader() {
 func (r *raft) callbackFunc(ifc interface{}, serverID []byte, data []byte) int {
 	if p, ok := r.peers[string(serverID)]; ok {
 		if peerMsg, err := show(data); err == nil {
-			logger.Debugf("-------------------------------------------")
+			logger.Debugf("----------------cback---------------------------")
 			logger.Debugf("callbackFunc %s %s ", p.name, parseMsgType(peerMsg.MSGType))
 			//当前节点状态若为不可用，只接收附加日志跟快照请求
 			if r.getState() == suspended {
 				if peerMsg.MSGType != appendLogRequest && peerMsg.MSGType != snapshootRequest {
-					logger.Warningf("ignore message.cur peer state is suspended,but the msgType is %d,only receiv appendLogRequest(%d) or snapshootRequest(%d)",
+					logger.Debugf("ignore message.cur peer state is suspended,but the msgType is %d,only receiv appendLogRequest(%d) or snapshootRequest(%d)",
 						peerMsg.MSGType, appendLogRequest, snapshootRequest)
 					return 0
 				}
@@ -365,6 +375,7 @@ func (r *raft) preQuitPeer(log []byte) {
 
 func (r *raft) updatePeer(log []byte) {
 	logger.Infof("in updatePeer")
+	defer logger.Infof("exit updatePeer")
 	pi := make(map[string]string)
 	err := json.Unmarshal(log, &pi)
 	if err != nil {
@@ -428,8 +439,8 @@ func (r *raft) updatePeer(log []byte) {
 		logger.Infof("peer commit self, id:%s, addr:%s", id, addr)
 
 		//共识节点
-		if typ == PeerJoin {
-			logger.Infof("cur peer join membership")
+		if typ == PeerJoin && r.getState() == suspended {
+			logger.Infof("cur peer join membership, update state suspended -> follower")
 			r.setState(follower)
 			r.localModel = 0
 			r.joinMemCh <- true
@@ -437,31 +448,25 @@ func (r *raft) updatePeer(log []byte) {
 	}
 }
 
-func (r *raft) commitLog(log []byte) {
-	typ, _ := miscellaneous.D32func(log[:4])
+func (r *raft) commitLog(typ uint32, commitIndex uint64, log []byte) {
+	//typ, _ := miscellaneous.D32func(log[:4])
 	//节点管理日志
 	if typ == 2 {
 		r.updatePeer(log[4:])
 		//return
 	}
-	r.cmtlog.execCommitLog(log)
-
-	//t1 := time.Now()
-	// err := r.commitFun(r.block, log)
-	//t := time.Now().Sub(t1)
-	//if t.Seconds() > 1 {
-	//	logger.Warningf("exec commitFun take long time %v", t)
-	//}
-	// if err != nil {
-	// 	logger.Warningf("exec commitFun err:%s", err)
-	// }
+	cmtlog := commitLog{
+		commitIndex: commitIndex,
+		typ:         typ,
+		log:         log,
+	}
+	r.commit.execCommitLog(cmtlog)
 }
 
 func (r *raft) newVoteReq() ([]byte, error) {
 	logger.Infof("begin create voteReq")
-	defer logger.Infof("end create voteReq")
-	// ht := r.blockChain.Height()
-	ht := r.getBlockHeight(r.commitIndex - r.log[0].index)
+	// ht := r.getBlockHeight(r.commitIndex - r.log[0].index)
+	ht := r.getBlockHeight(0)
 	r.currentTerm++    //当前任期自增
 	r.grantedVotes = 1 //给自己投票
 	//选举投票请求
@@ -472,6 +477,7 @@ func (r *raft) newVoteReq() ([]byte, error) {
 		LastLogTerm:  r.getLastTerm(),
 		BlockHeight:  ht,
 	}
+	logger.Infof("end create voteReq ht:%d", ht)
 	return proto.Marshal(req)
 }
 

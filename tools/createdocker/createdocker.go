@@ -66,7 +66,7 @@ func existBaseImage() bool {
 	var isExist = false
 	for _, img := range imgs {
 		for _, v := range img.RepoTags {
-			if v == viper.GetString("Docker.BaseImage")+":"+viper.GetString("Docker.Version") {
+			if v == "tjfoc/tjfoc-ccenv:"+viper.GetString("Docker.BaseImageVersion") {
 				isExist = true
 				break
 			}
@@ -76,8 +76,8 @@ func existBaseImage() bool {
 }
 
 func main() {
-	newImage := viper.GetString("Docker.BaseImage")
-	version := viper.GetString("Docker.Version")
+	newImage := "tjfoc/tjfoc-ccenv"
+	version := viper.GetString("Docker.BaseImageVersion")
 	if existBaseImage() {
 		mainLogger.Warningf("docker images: %s:%s is already exist, please check if it is the latest version\n", newImage, version)
 		return

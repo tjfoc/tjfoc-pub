@@ -55,9 +55,22 @@ type p2pProto struct {
 	sp           proto.SP
 	lock         sync.Mutex
 	cycle        time.Duration
+	probeQueue   *p2pQueue
 	consensusAPI consensus.Consensus
 	exitCh       map[string]chan bool
 	chain        blockchain.BlockChain
+}
+
+type tranP2p struct {
+	id   []byte
+	data []byte
+	typ  uint32
+}
+
+type p2pQueue struct {
+	notice   chan bool
+	lock     sync.Mutex
+	tranList []*tranP2p
 }
 
 type p2pRegistry struct {

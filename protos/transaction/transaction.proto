@@ -2,17 +2,31 @@ syntax = "proto3";
 
 package transaction;
 
+//隐私交易相关方
+message Node{
+    bytes id = 1;
+    bytes key = 2;
+}
+
+//交易头
 message TransactionHeader{
     uint32 version = 1;
     uint64 timestamp = 2;
-    bytes transactionHash = 3;
-    bytes transactionSign = 4;
-    bytes bigNum = 5;
+    uint32 privacy = 3; //交易类型，1-隐私交易；0-非隐私交易
+    bytes transactionHash = 4;
+    bytes transactionSign = 5;
 }
 
+//交易
 message Transaction{
+    TransactionHeader header = 1;
+    repeated Node nodes = 2; //隐私交易相关方
+    bytes deal = 3;//隐私交易
+    repeated bytes records = 4;
+}
+
+//隐私交易
+message Deal{
     bytes smartContract = 1;
-    repeated bytes records = 2;
-    TransactionHeader header = 3;
-    repeated bytes smartContractArgs = 4;
+    repeated bytes smartContractArgs = 2;
 }

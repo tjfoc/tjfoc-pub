@@ -21,13 +21,17 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"hash"
 	"math/big"
 	"os"
+	"strconv"
 
 	"github.com/tjfoc/gmsm/sm2"
+	"github.com/tjfoc/tjfoc/core/he"
 	pb "github.com/tjfoc/tjfoc/protos/chaincode"
 )
 
@@ -44,6 +48,12 @@ type ChaincodeStub struct {
 	transient map[string][]byte
 	binding   []byte
 }
+type singleValue struct {
+	Value    []byte
+	IsSecret bool
+}
+
+var usedKV map[string]*singleValue
 
 // -- init stub ---
 // ChaincodeInvocation functionality
@@ -52,6 +62,7 @@ func (stub *ChaincodeStub) init(handler *Handler, txid string, input *pb.Chainco
 	stub.TxID = txid
 	stub.args = input.Args
 	stub.handler = handler
+	usedKV = make(map[string]*singleValue)
 	return nil
 }
 
@@ -97,6 +108,75 @@ func dealKey(key string) string {
 	prefix := os.Args[3] + "-"
 	return prefix + key
 }
+func (stub *ChaincodeStub) Add(key string, originvalue []byte, dealvalue int64) ([]byte, error) {
+	k := dealKey(key)
+	v, ok := usedKV[k]
+	if !ok || (ok && !v.IsSecret) {
+		//不要用同态加法
+		temp, e := strconv.ParseInt(string(originvalue), 10, 64)
+		if e != nil {
+			return nil, errors.New("originvalue error!")
+		}
+		tempResult := temp + dealvalue
+		r := strconv.FormatInt(tempResult, 10)
+		return []byte(r), nil
+	}
+	if ok && v.IsSecret {
+		//需要用同态加法
+		svalue, e := stub.RequireCrypt(dealvalue)
+		if e != nil {
+			return nil, e
+		}
+		return he.Add(originvalue, svalue)
+	}
+	return nil, errors.New("can't deal this add")
+}
+func (stub *ChaincodeStub) Sub(key string, originvalue []byte, dealvalue int64) ([]byte, error) {
+	k := dealKey(key)
+	v, ok := usedKV[k]
+	if !ok || (ok && !v.IsSecret) {
+		//不需要同态减法
+		temp, e := strconv.ParseInt(string(originvalue), 10, 64)
+		if e != nil {
+			return nil, errors.New("originvalue error!")
+		}
+		tempResult := temp - dealvalue
+		r := strconv.FormatInt(tempResult, 10)
+		return []byte(r), nil
+	}
+	if ok && v.IsSecret {
+		//需要同态减法
+		svalue, e := stub.RequireCrypt(dealvalue)
+		if e != nil {
+			return nil, e
+		}
+		return he.Sub(originvalue, svalue)
+	}
+	return nil, errors.New("can't deal this sub")
+}
+func (stub *ChaincodeStub) Cmp(key string, originvalue []byte, dealvalue int64) (int64, error) {
+	k := dealKey(key)
+	v, ok := usedKV[k]
+	if !ok || (ok && !v.IsSecret) {
+		i, e := strconv.ParseInt(string(originvalue), 10, 64)
+		if e != nil {
+			return int64(0), e
+		}
+		if i < dealvalue {
+			return int64(-1), nil
+		}
+		if i == dealvalue {
+			return int64(0), nil
+		}
+		if i > dealvalue {
+			return int64(1), nil
+		}
+	}
+	if ok && v.IsSecret {
+		return stub.handler.handleRequireCompare(originvalue, dealvalue, stub.TxID)
+	}
+	return int64(0), errors.New("can't deal this cmp")
+}
 
 // GetState documentation can be found in interfaces.go
 func (stub *ChaincodeStub) GetState(key string) ([]byte, error) {
@@ -104,20 +184,21 @@ func (stub *ChaincodeStub) GetState(key string) ([]byte, error) {
 		return nil, fmt.Errorf("key must not be an empty string")
 	}
 	key = dealKey(key)
-	return stub.handler.handleGetState(key, stub.TxID)
-}
-
-// DelState documentation can be found in interfaces.go
-func (stub *ChaincodeStub) DelState(key string) error {
-	if key == "" {
-		return fmt.Errorf("key must not be an empty string")
+	res, err := stub.handler.handleGetState(key, stub.TxID)
+	if err != nil {
+		return nil, err
 	}
-	key = dealKey(key)
-	return stub.handler.handleDelState(key, stub.TxID)
+	value := new(singleValue)
+	json.Unmarshal(res, value)
+	if value == nil {
+		fmt.Println("value == nil")
+	}
+	usedKV[key] = value
+	return value.Value, nil
 }
 
 // GetStaten documentation can be found in interfaces.go
-func (stub *ChaincodeStub) GetStaten(keyn []string) (map[string]string, error) {
+func (stub *ChaincodeStub) GetStaten(keyn []string) (map[string][]byte, error) {
 	a := make([]string, 0)
 	for _, v := range keyn {
 		if v != "" {
@@ -131,7 +212,45 @@ func (stub *ChaincodeStub) GetStaten(keyn []string) (map[string]string, error) {
 	for i, _ := range keyn {
 		keyn[i] = dealKey(keyn[i])
 	}
-	return stub.handler.handleGetStaten(keyn, stub.TxID)
+	res, err := stub.handler.handleGetStaten(keyn, stub.TxID)
+	if err != nil {
+		return nil, err
+	}
+	tempkv := make(map[string][]byte)
+	for k, v := range res {
+		value := new(singleValue)
+		json.Unmarshal([]byte(v), value)
+		usedKV[k] = value
+		tempkv[k] = value.Value
+	}
+	return tempkv, nil
+}
+func (stub *ChaincodeStub) GetStateByPrefix(key string) (map[string][]byte, error) {
+	if key == "" {
+		return nil, fmt.Errorf("key must not be an empty string")
+	}
+	key = dealKey(key)
+	res, err := stub.handler.handleGetStateByPrefix(key, stub.TxID)
+	if err != nil {
+		return nil, err
+	}
+	tempkv := make(map[string][]byte)
+	for k, v := range res {
+		value := new(singleValue)
+		json.Unmarshal([]byte(v), value)
+		usedKV[k] = value
+		tempkv[k] = value.Value
+	}
+	return tempkv, nil
+}
+
+// DelState documentation can be found in interfaces.go
+func (stub *ChaincodeStub) DelState(key string) error {
+	if key == "" {
+		return fmt.Errorf("key must not be an empty string")
+	}
+	key = dealKey(key)
+	return stub.handler.handleDelState(key, stub.TxID)
 }
 
 // DelStaten documentation can be found in interfaces.go
@@ -158,19 +277,36 @@ func (stub *ChaincodeStub) PutState(key string, value []byte) error {
 		return fmt.Errorf("key must not be an empty string")
 	}
 	key = dealKey(key)
-	return stub.handler.handlePutState(key, value, stub.TxID)
+	var putvalue []byte
+	v, ok := usedKV[key]
+	if !ok {
+		vv := &singleValue{
+			Value:    value,
+			IsSecret: false,
+		}
+		putvalue, _ = json.Marshal(vv)
+	}
+	if ok {
+		vv := &singleValue{
+			Value:    value,
+			IsSecret: v.IsSecret,
+		}
+		putvalue, _ = json.Marshal(vv)
+	}
+	return stub.handler.handlePutState(key, putvalue, stub.TxID)
 }
 
+//请求对文明数值进行同态加密
+func (stub *ChaincodeStub) RequireCrypt(value int64) ([]byte, error) {
+	return stub.handler.handleRequireCrypt(value, stub.TxID)
+}
+
+/*
 // InvokeChaincode documentation can be found in interfaces.go
 func (stub *ChaincodeStub) InvokeChaincode(chaincodeName string, chaincodeVersion string, args [][]byte) pb.Response {
 	return stub.handler.handleInvokeChaincode(chaincodeName, chaincodeVersion, args, stub.TxID)
 }
-
-func (stub *ChaincodeStub) GetStateByPrefix(key string) (map[string]string, error) {
-	key = dealKey(key)
-	return stub.handler.handleGetStateByPrefix(key, stub.TxID)
-}
-
+*/
 // CommonIterator documentation can be found in interfaces.go
 type CommonIterator struct {
 	handler *Handler

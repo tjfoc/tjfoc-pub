@@ -15,22 +15,20 @@ limitations under the License.
 package config
 
 type PeerConfig struct {
-	PackTime  int32
-	Typ       string
-	Admin     string
-	Self      IdConfig
-	Log       LogConfig
-	Rpc       RpcConfig
-	Node      NodeConfig
-	Crypt     CryptConfig
-	StorePath StoreConfig
-	Members   MemberConfig
+	Self       IdConfig
+	Log        LogConfig
+	Rpc        RpcConfig
+	Node       NodeConfig
+	Crypt      CryptConfig
+	StorePath  StoreConfig
+	P2P        P2pConfig
+	Members    MemberConfig
+	BlockChain BlockChainConfig
 }
 
 type StoreConfig struct {
-	CertStorePath  string
-	Path           string
-	WorldStatePath string
+	CertStorePath string
+	Path          string
 }
 
 type NodeConfig struct {
@@ -38,6 +36,7 @@ type NodeConfig struct {
 	NodeKeyPath  string
 	RootKeyPath  string
 	RootCertPath string
+	Admin        string
 }
 
 type LogConfig struct {
@@ -58,10 +57,11 @@ type RpcConfig struct {
 }
 
 type CryptConfig struct {
-	KeyTyp   string
-	HashTyp  string
-	KeyPath  string
-	TxVerify bool
+	PkiTyp    string
+	CipherTyp string
+	HashTyp   string
+	PkiPath   string
+	TxVerify  bool
 }
 
 type IdConfig struct {
@@ -74,8 +74,12 @@ type P2pConfig struct {
 	Cycle int
 }
 
+type BlockChainConfig struct {
+	PackTime int
+}
+
 type MemberConfig struct {
-	Port  int
-	P2P   P2pConfig
+	//Port  int
+	//P2P   P2pConfig
 	Peers []IdConfig
 }

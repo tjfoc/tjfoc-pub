@@ -53,11 +53,10 @@ func newGrpcServer() (*grpc.Server, []grpc.DialOption) {
 		return grpc.NewServer(grpc.Creds(gmcredentials.NewTLS(&gmtls.Config{
 				Certificates: []gmtls.Certificate{cert},
 				ClientCAs:    certPool,
-			}))), []grpc.DialOption{grpc.WithTimeout(time.Duration(Config.Rpc.Timeout) * time.Millisecond),
+			})), grpc.StatsHandler(&statshandler{})), []grpc.DialOption{grpc.WithTimeout(time.Duration(Config.Rpc.Timeout) * time.Millisecond),
 				grpc.WithTransportCredentials(creds)}
-
 	} else {
-		return grpc.NewServer(), []grpc.DialOption{grpc.WithInsecure()}
+		return grpc.NewServer(grpc.StatsHandler(&statshandler{})), []grpc.DialOption{grpc.WithInsecure()}
 	}
 }
 
@@ -66,6 +65,7 @@ func (p *peer) serverRun() {
 	if lis, err := net.Listen("tcp", fmt.Sprintf(":%d", Config.Rpc.Port)); err != nil {
 		logger.Fatal(err)
 	} else {
+		logger.Infof("rpc server startup %d", Config.Rpc.Port)
 		go p.packProcess()
 		go p.p2pServer.Run()
 		go p.consensusAPI.Start()
@@ -82,9 +82,19 @@ func (p *peer) serverRun() {
 }
 
 func (p *peer) packProcess() {
+	go func() {
+		for {
+			time.Sleep(time.Second * 5)
+			c := p.blockChain.GetTransactionNumber()
+			if c > 0 {
+				logger.Infof("Unpack Transaction %d", c)
+			}
+		}
+	}()
+
 	for {
 		select {
-		case <-time.After(time.Duration(Config.PackTime) * time.Millisecond):
+		case <-time.After(time.Duration(Config.BlockChain.PackTime) * time.Millisecond):
 			if p.consensusAPI.IsLeader() {
 				if b := p.blockChain.Pack(uint64(time.Now().Unix())); b != nil {
 					if data, err := b.Show(); err == nil {
@@ -99,26 +109,26 @@ func (p *peer) packProcess() {
 func packCallback(a interface{}, d []byte) error {
 	p, _ := a.(*peer)
 	typ, _ := miscellaneous.D32func(d[:4])
-
-	logger.Infof("*************packCallback begin typ:%v***********", typ)
-	defer logger.Infof("*************packCallback end typ:%v***********", typ)
-
 	switch typ {
 	case 0:
-
 		b := new(block.Block)
-
 		if _, err := b.Read(d[4:]); err != nil {
 			logger.Errorf("b.Read Err: %s", err)
 			return err
 		}
+		logger.Infof("pre packAddBlock height:%d", b.Height())
 		if err := p.blockChain.PackAddBlock(b); err != nil {
+			logger.Errorf("blockChain PackAddBlock Err: %s", err)
 			return err
 		}
 	case 1:
 		h, _ := miscellaneous.D64func(d[4:12])
 		p.blockChain.SaveThreshold(h)
 		logger.Warningf("+++++++++++packcall pack snapshot %v\n", h)
+	case 3:
+		h, _ := miscellaneous.D64func(d[4:12])
+		logger.Infof("update threshold logs threshold:%d", h)
+		p.blockChain.SaveThreshold(h)
 	case 2:
 		v := make(map[string]string)
 

@@ -1,0 +1,19 @@
+Rpc:
+    UseTLS: false
+    Port: 7890
+    TimeOut: 30
+    TLSCaPath: "./crypt/ca.pem"
+    TLSKeyPath: "./crypt/key.pem"
+    TLSCertPath: "./crypt/cert.pem"
+    TLSServerName: "test.example.com"
+
+Crypto:
+    Key: "sm2"
+    Hash: "sm3"
+    APubkeyPath: "./pubkey/pubkey1.pem" #155
+    BPubkeyPath: "./pubkey/pubkey2.pem" #156
+    CPubkeyPath: "./pubkey/pubkey3.pem" #157
+    DPubkeyPath: "./pubkey/pubkey4.pem" #158
+    EPubkeyPath: "./pbukey/pubkey5.pem"
+Log:
+    LogLevel: "info"

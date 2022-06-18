@@ -52,6 +52,7 @@ type peer struct {
 	messages []*PeerMessage
 	noticeCh chan bool
 
+	//清理缓存的消息
 	cleanNum int
 }
 
@@ -125,8 +126,8 @@ func (p *peer) sendPeerMessage(msg *PeerMessage) {
 	t1 := time.Now()
 	err := p.sp.SendInstruction(0, raftTCP, data, p.hashid)
 	t := time.Now().Sub(t1)
-	if t.Seconds() > 1 {
-		logger.Warningf("SendInstruction %s %s take long time %s", p.name, parseMsgType(msg.MSGType), t)
+	if t.Seconds() > 3 {
+		logger.Warningf("SendInstruction %s %s take %s err:%v", p.name, parseMsgType(msg.MSGType), t, err)
 	}
 	if err != nil {
 		logger.Debugf("SendInstruction %s %s error:%v", p.name, parseMsgType(msg.MSGType), err)
@@ -174,46 +175,3 @@ func bytesToUint32(a []byte) (uint32, error) {
 	}
 	return b, nil
 }
-
-// func (p *peer) peerProcess() {
-// 	for {
-// 		select {
-// 		case <-p.exitCh:
-// 			logger.Warningf("peer %s remove raft membership.", p.name)
-// 			return
-// 		case msg := <-p.peerCh:
-// 			p.sendPeerMessage(msg)
-// 		}
-// 	}
-// }
-
-// func (p *peer) notifyPeer(msgtype MsgType, data []byte) {
-// 	if len(p.peerCh) < maxPeerChan {
-// 		if len(p.peerCh) > 1 {
-// 			logger.Warningf("peer:%s, peerCh len:%d, msgtype:%s, lastSendMsgType:%s", p.name, len(p.peerCh), parseMsgType(msgtype), parseMsgType(lastSendMsgType))
-// 		}
-// 		lastSendMsgType = msgtype
-// 		p.peerCh <- &PeerMessage{
-// 			MSGType: msgtype,
-// 			Data:    data,
-// 		}
-// 	} else {
-// 		logger.Warningf("peer:%s, peerCh len:%d is full. cancel PeerMessage msgtype:%s.lastSendMsgType:%s", p.name, len(p.peerCh), parseMsgType(msgtype), parseMsgType(lastSendMsgType))
-// 	}
-// }
-
-// func (p *peer) checkPeerMsg(msgtype MsgType) bool {
-// 	switch msgtype {
-// 	case appendLogRequest:
-// 		if p.raft.getState() != leader {
-// 			logger.Infof("cur state is not leader,cancel send logReq to %s", p.name)
-// 			return false
-// 		}
-// 	case voteRequest:
-// 		if p.raft.getState() != candidate {
-// 			logger.Infof("cur state is not candidate,cancel send voteReq to %s", p.name)
-// 			return false
-// 		}
-// 	}
-// 	return true
-// }

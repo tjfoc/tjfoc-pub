@@ -88,8 +88,11 @@ func (r *raft) notifyMessage(p *peer, msgtype MsgType, data []byte) {
 	} else {
 		logger.Debugf("add messageCh len:%d, msgtype:%s, lastMsgType:%s", len(r.msgCh), parseMsgType(msgtype), parseMsgType(lastMsgType))
 	}
+	if len(r.msgCh) > 1 {
+		logger.Infof("add messageCh len:%d, msgtype:%s, lastMsgType:%s", len(r.msgCh), parseMsgType(msgtype), parseMsgType(lastMsgType))
+	}
 	if len(r.msgCh) == maxMsgChan {
-		logger.Warningf("remove top messageCh")
+		logger.Warningf("lastMsgType:%s, msgCh:%d is full, remove top", parseMsgType(msgtype), len(r.msgCh))
 		<-r.msgCh
 	}
 	lastMsgType = msg.msgtype
@@ -121,8 +124,8 @@ func (r *raft) doSnapRequest(msg *message) {
 		logger.Errorf("proto.Unmarshal err %s", err)
 		return
 	}
-	logger.Infof("snapshoot begin LastIncludedIndex = %d, logLen:%d, cur snapLog term:%d, index:%d",
-		snapReq.LastIncludedIndex, len(r.log), r.log[0].term, r.log[0].index)
+	logger.Infof("snapshoot begin req[term:%d,index:%d,height:%d], cur[term:%d,index:%d,logLen:%d]",
+		snapReq.Term, snapReq.LastIncludedIndex, snapReq.BlockHeight, r.log[0].term, r.log[0].index, len(r.log))
 
 	defer func() {
 		respLog := &pb.AppendEntriesResponse{
@@ -175,7 +178,7 @@ func (r *raft) doSnapRequest(msg *message) {
 	}
 	//快照是否已经安装过
 	if r.log[0].index >= snapReq.LastIncludedIndex {
-		logger.Infof("return,cur's baseIndex:%d > snapReq.index:%d, have installed snapshoot", r.log[0].index, snapReq.LastIncludedIndex)
+		logger.Infof("return, cur.baseIndex:%d >= snapReq.index:%d, have installed snapshoot", r.log[0].index, snapReq.LastIncludedIndex)
 		return
 	}
 
@@ -237,7 +240,7 @@ func (r *raft) doSnapRequest(msg *message) {
 		}
 		log = append(miscellaneous.E32func(2), log...)
 		logger.Infof("begin commit log, peer update")
-		r.commitLog(log)
+		r.commitLog(2, 0, log)
 		logger.Infof("end commit log, peer update")
 	}
 
@@ -249,7 +252,7 @@ func (r *raft) doSnapRequest(msg *message) {
 	//提交快照
 	log := append(miscellaneous.E32func(1), miscellaneous.E64func(snapReq.BlockHeight)...)
 	logger.Infof("begin commit snaplog,height:%d", snapReq.BlockHeight)
-	r.commitLog(log)
+	r.commitLog(1, 0, log)
 	logger.Infof("end commit snaplog")
 }
 
@@ -267,27 +270,33 @@ func (r *raft) doVote(msg *message) {
 }
 
 func (r *raft) getBlockHeight(index uint64) uint64 {
+	logger.Infof("begin getBlockHeight")
+	var bh uint64
 	t1 := time.Now()
 	if r.getLastIndex() == 0 {
-		return r.blockChain.Height()
+		bh = r.blockChain.Height()
+		logger.Infof("end getBlockHeight, bh:%d", bh)
+		return bh
 	}
-	//从快照取高度
+	//从提交的日志中获取高度
 	if index > 0 {
 		b := new(block.Block)
-		//index := r.commitIndex - r.log[0].index
 		for i := index; i > 0; i-- {
 			typ, err := bytesToUint32(r.log[i].data[:4])
 			if err == nil && typ == 0 {
 				b.Read(r.log[index].data[4:])
-				return b.Height()
+				bh = b.Height()
+				logger.Infof("end getBlockHeight from logs, bh:%d", bh)
+				return bh
 			}
 		}
 	}
-	bh := r.blockChain.Height()
+	bh = r.blockChain.Height()
 	t := time.Now().Sub(t1)
 	if t.Seconds() > 1 {
 		logger.Warningf("getBlockHeight take long time %s", t)
 	}
+	logger.Infof("end getBlockHeight, bh:%d", bh)
 	return bh
 }
 
@@ -297,7 +306,7 @@ func (r *raft) doVoteRequest(msg *message) {
 		logger.Errorf("unknow peer:%s", msg.peerid)
 		return
 	}
-	logger.Infof("rev peer:%s", p.name)
+	logger.Infof("doVoteRequest rev peer:%s", p.name)
 	//返回投票结果
 	voteResp := &pb.RequestVoteResponse{
 		Term:        r.currentTerm,
@@ -329,16 +338,16 @@ func (r *raft) doVoteRequest(msg *message) {
 
 	//如果term < currentTerm返回 false
 	if voteReq.Term < r.currentTerm {
-		logger.Infof("req.Term:%d < cur.Term :%d not vote", voteReq.Term, r.currentTerm)
+		logger.Infof("req.Term:%d < cur.Term :%d not vote return false.", voteReq.Term, r.currentTerm)
 		return
 	}
 	//任期号T > currentTerm，那么就令 currentTerm 等于 T，并切换状态为跟随者
 	if voteReq.Term > r.currentTerm {
-		logger.Infof("req.term %d > cur.term %d", voteReq.Term, r.currentTerm)
+		logger.Infof("update new term %d -> %d", r.currentTerm, voteReq.Term)
 		r.currentTerm = voteReq.Term
 		r.leaderID = ""
 		if r.getState() != follower {
-			logger.Infof("set new state:follower, term:%d", r.currentTerm)
+			logger.Infof("update state %s -> follower", r.parseRaftState(r.getState()))
 			r.setState(follower)
 			r.breakCh <- 1
 		}
@@ -347,7 +356,7 @@ func (r *raft) doVoteRequest(msg *message) {
 	}
 	voteResp.Term = r.currentTerm
 	if voteReq.BlockHeight < bh {
-		logger.Infof("req.BlockHeight:%d < cur.BlockHeight:%d not vote", voteReq.BlockHeight, bh)
+		logger.Infof("req.BlockHeight:%d < cur.BlockHeight:%d not vote,return", voteReq.BlockHeight, bh)
 		return
 	}
 	//一个任期号投出一张选票
@@ -369,6 +378,7 @@ func (r *raft) doVoteRequest(msg *message) {
 	} else {
 		logger.Infof("cur peer have voted.")
 	}
+	logger.Infof("exit doVoteRequest")
 }
 
 func (r *raft) doVoteResponse(msg *message) {
@@ -376,7 +386,7 @@ func (r *raft) doVoteResponse(msg *message) {
 	//如果一个服务器的当前任期号比其他人小，那么他会更新自己的编号到较大的编号值
 	//候选人从整个集群的大多数服务器节点获得了针对同一个任期号的选票
 	if p, ok := r.peers[msg.peerid]; ok {
-		logger.Infof("rev peer:%s", p.name)
+		logger.Infof("doVoteResponse rev peer:%s", p.name)
 	}
 	if r.getState() != candidate {
 		logger.Infof("cur state is %s not candidate, exit doVoteResponse", r.parseRaftState(r.getState()))
@@ -390,7 +400,7 @@ func (r *raft) doVoteResponse(msg *message) {
 	}
 	// bh := r.getBlockHeight(r.commitIndex - r.log[0].index)
 	bh := r.getBlockHeight(0)
-	logger.Infof("resp, term:%d, voteGranted:%v, blockHeight:%d, cur, term:%d, blockHeight:%d",
+	logger.Infof("vote resp[term:%d, voteGranted:%v, blockHeight:%d] cur[term:%d, blockHeight:%d]",
 		voteResp.Term, voteResp.VoteGranted, voteResp.BlockHeight, r.currentTerm, bh)
 	if r.currentTerm > voteResp.Term {
 		logger.Infof("cur.Term > resp.Term, exit doVoteResponse")
@@ -399,7 +409,7 @@ func (r *raft) doVoteResponse(msg *message) {
 	if r.currentTerm < voteResp.Term || bh < voteResp.BlockHeight {
 		logger.Infof("cur.Term < resp.Term or < cur.blockHeigh < resp.blockHeight")
 		r.currentTerm = voteResp.Term
-		logger.Infof("set new state:follower, term:%d", r.currentTerm)
+		logger.Infof("update state candidate -> follower, term:%d", r.currentTerm)
 		r.setState(follower)
 		r.leaderID = ""
 		r.breakCh <- 1
@@ -408,20 +418,22 @@ func (r *raft) doVoteResponse(msg *message) {
 	if voteResp.VoteGranted {
 		r.grantedVotes++
 	}
+	logger.Infof("get grantedVotes:%d", r.grantedVotes)
 	if r.grantedVotes > r.quorumSize() {
 		logger.Infof("win leader term:%d", r.currentTerm)
+		logger.Infof("update all follower peers nextIndex=%d", r.getLastIndex()+1)
 		for _, peer := range r.peers {
 			peer.clean() //clean message
 			if peer.model == 0 {
 				r.matchIndex[peer.pid] = 0
 			}
 			r.nextIndex[peer.pid] = r.getLastIndex() + 1
-			logger.Infof("set r.nextIndex[%s]= %d ", peer.name, r.nextIndex[peer.pid])
 		}
 		r.leaderID = r.localID
 		r.setState(leader)
 		r.leaderCh <- true
 	}
+	logger.Info("exit doVoteResponse")
 }
 
 func (r *raft) doHeartBeat() {
@@ -453,6 +465,10 @@ func (r *raft) heartBeatToPeer(p *peer) {
 		if nextIndex-baseIndex > uint64(len(r.log)) {
 			logger.Errorf("peer:%s, nextIndex:%d, baseIndex:%d, len log:%d, commitIndex:%d", p.name, nextIndex, baseIndex, len(r.log), r.commitIndex)
 			nextIndex = baseIndex + uint64(len(r.log)) - 1
+			if nextIndex < 1 {
+				nextIndex = 1
+			}
+			r.nextIndex[p.pid] = nextIndex
 			logger.Warningf("set nextIndex:%d", nextIndex)
 		}
 		reqLog := &pb.AppendEntriesRequest{
@@ -480,14 +496,12 @@ func (r *raft) heartBeatToPeer(p *peer) {
 		}
 		p.notifyPeer(appendLogRequest, bytes)
 	} else {
-		// bh := r.getBlockHeight(r.commitIndex - r.log[0].index)
-		bh := r.getBlockHeight(0)
 		snapReq := &pb.SnapshootRequest{
 			Term:              r.currentTerm,
 			LeaderId:          r.localID,
 			LastIncludedIndex: r.log[0].index,
 			LastIncludedTerm:  r.log[0].term,
-			BlockHeight:       bh,
+			BlockHeight:       r.log[0].height,
 			Peers:             r.log[0].data,
 		}
 		bytes, err := proto.Marshal(snapReq)
@@ -495,8 +509,8 @@ func (r *raft) heartBeatToPeer(p *peer) {
 			logger.Errorf("proto.Marshal err %s", err)
 			return
 		}
-		logger.Infof("peer:%s nextIndex:%d < cur.baseIndex:%d, install snapshoot [Term:%d, Index:%d]",
-			p.name, nextIndex, baseIndex, snapReq.LastIncludedTerm, snapReq.LastIncludedIndex)
+		logger.Infof("peer:%s nextIndex:%d < cur.baseIndex:%d, install snapshoot [Term:%d, Index:%d，Height:%d]",
+			p.name, nextIndex, baseIndex, snapReq.LastIncludedTerm, snapReq.LastIncludedIndex, snapReq.BlockHeight)
 		p.notifyPeer(snapshootRequest, bytes)
 	}
 }
@@ -525,6 +539,8 @@ func (r *raft) doAppendLogRequest(msg *message) {
 			return
 		}
 		if p, ok := r.peers[msg.peerid]; ok {
+			logger.Debugf("back respLog(Term:%d,LastLog:%d,Success:%v,NoRetryBackoff:%v)",
+				respLog.Term, respLog.LastLog, respLog.Success, respLog.NoRetryBackoff)
 			p.notifyPeer(appendLogResponse, bytes)
 		}
 	}()
@@ -575,6 +591,7 @@ func (r *raft) doAppendLogRequest(msg *message) {
 		r.heartbeatCh <- true
 	}
 	baseIndex := r.log[0].index
+
 	if reqLog.PrevLogIndex > r.getLastIndex() || reqLog.PrevLogIndex < baseIndex {
 		logger.Warningf("peer:%s. does not match cur.baseIndex:%d < req.PrevLogIndex:%d < cur.lastIndex:%d, exit",
 			p.name, baseIndex, reqLog.PrevLogIndex, r.getLastIndex())
@@ -589,27 +606,18 @@ func (r *raft) doAppendLogRequest(msg *message) {
 		if reqLog.PrevLogTerm != term {
 			logger.Infof("reqLog.PrevLogIndex:%d, reqLog.PrevLogTerm:%d, baseIndex:%d, term:%d", reqLog.PrevLogIndex, reqLog.PrevLogTerm, baseIndex, term)
 			logger.Warningf("reqLog.PrevLogTerm %d != exist log term %d, exit", reqLog.PrevLogTerm, term)
-			/*
-				for i := reqLog.PrevLogIndex - 1; i >= baseIndex; i-- {
-						if r.log[i-baseIndex].term == term {
-							r.log = r.log[:i-baseIndex+1]
-							logger.Warningf("follower delete not match log, from index:%d", i)
-							break
-						}
-				}
-			*/
 			r.log = r.log[:reqLog.PrevLogIndex-baseIndex]
 			return
 		}
 	}
 	//附加日志
 	if len(reqLog.Entries) > 0 {
-		logger.Debugf("reqLog[term:%d,preTerm:%d,preIdx:%d,leaderCommit:%d] ", reqLog.Term, reqLog.PrevLogTerm, reqLog.PrevLogIndex, reqLog.LeaderCommit)
-		logger.Debugf("curLog[baseIndex:%d,logLen:%d,lastLogTerm:%d,lastLogIdx:%d,commitIdex:%d]", baseIndex, len(r.log), r.getLastTerm(), r.getLastIndex(), r.commitIndex)
+		logger.Infof("reqLog[term:%d,preTerm:%d,preIdx:%d,leaderCommit:%d] ", reqLog.Term, reqLog.PrevLogTerm, reqLog.PrevLogIndex, reqLog.LeaderCommit)
+		logger.Debug("curLog[baseIndex:%d,logLen:%d,lastLogTerm:%d,lastLogIdx:%d,commitIdex:%d]", baseIndex, len(r.log), r.getLastTerm(), r.getLastIndex(), r.commitIndex)
 		if uint64(len(r.log)) > reqLog.PrevLogIndex+1-baseIndex {
-			logger.Warningf("cur.logLen:%d, baseIndex:%d, reqLog.PrevLogIndex:%d", len(r.log), baseIndex, reqLog.PrevLogIndex)
-			r.log = r.log[:reqLog.PrevLogIndex-baseIndex+1]
-			logger.Warningf("cut off, logLen:%d", len(r.log))
+			logger.Debugf("cur.logLen:%d, baseIndex:%d, reqLog.PrevLogIndex:%d", len(r.log), baseIndex, reqLog.PrevLogIndex)
+			r.log = r.log[:reqLog.PrevLogIndex+1-baseIndex]
+			logger.Infof("cut off logs, lastIndex:%d", r.getLastIndex())
 		}
 		newLog := reqLog.Entries[0]
 		if newLog.Index == r.getLastIndex()+1 {
@@ -633,9 +641,8 @@ func (r *raft) doAppendLogRequest(msg *message) {
 		commitindex := r.commitIndex
 		for i := r.commitIndex + 1; i <= reqLog.LeaderCommit && i <= r.getLastIndex(); i++ {
 			if i > baseIndex {
-				logger.Infof("follower commit begin, term:%d, commitIndex:%d", r.currentTerm, i)
-				r.commitLog(r.log[i-baseIndex].data)
-				logger.Infof("follower commit end")
+				logger.Infof("follower commit term:%d, commitIndex:%d", r.currentTerm, i)
+				r.commitLog(0, i, r.log[i-baseIndex].data)
 			}
 			commitindex++
 		}
@@ -665,6 +672,7 @@ func (r *raft) doAppendLogResponse(msg *message) {
 		logger.Errorf("proto.Unmarshal err %s", err)
 		return
 	}
+
 	logger.Debugf("peer %s appendLogResponse[term:%d,succ:%v,lastLog:%d]",
 		p.name, logResp.Term, logResp.Success, logResp.LastLog)
 	if logResp.NoRetryBackoff {
@@ -687,15 +695,14 @@ func (r *raft) doAppendLogResponse(msg *message) {
 	}
 	if r.nextIndex[peerid] != logResp.LastLog+1 {
 		r.nextIndex[peerid] = logResp.LastLog + 1
-		logger.Infof("peer:%s set nextIndex:%d", p.name, logResp.LastLog+1)
+		logger.Debugf("peer:%s set nextIndex:%d", p.name, logResp.LastLog+1)
 	}
 	if logResp.Success {
 		if r.matchIndex[peerid] != logResp.LastLog {
 			r.matchIndex[peerid] = logResp.LastLog
-			logger.Infof("peer:%s set matchIndex:%d", p.name, logResp.LastLog)
+			logger.Debugf("peer:%s set matchIndex:%d", p.name, logResp.LastLog)
 		}
 	}
-
 }
 
 func (r *raft) checkCommit() {
@@ -716,9 +723,8 @@ func (r *raft) checkCommit() {
 	if commitIndex != r.commitIndex {
 		for i := r.commitIndex + 1; i <= commitIndex; i++ {
 			if i > baseIndex {
-				logger.Infof("leader commit begin, term:%d, commitIndex:%d", r.currentTerm, i)
-				r.commitLog(r.log[i-baseIndex].data)
-				logger.Infof("leader commit end")
+				logger.Infof("leader commit term:%d, commitIndex:%d", r.currentTerm, i)
+				r.commitLog(0, i, r.log[i-baseIndex].data)
 			}
 		}
 		r.commitIndex = commitIndex
@@ -743,7 +749,7 @@ func (r *raft) checkSnapshoot() {
 	snapTerm := r.log[snapshootLimit].term
 	logData := append(miscellaneous.E64func(bh), peerBytes...)
 	r.log = r.log[snapshootLimit:]
-	r.log[0] = logEntry{index: snapIndex, term: snapTerm, data: logData}
+	r.log[0] = logEntry{index: snapIndex, term: snapTerm, data: logData, height: bh}
 
 	if snapIndex%snapshootLimit != 0 {
 		logger.Errorf("err snapIndex:%d,snapIndex / napshootLimit != 0", snapIndex)
@@ -756,7 +762,7 @@ func (r *raft) checkSnapshoot() {
 	logger.Infof("begin commit snaplog, block height:%d", bh)
 	commitData := miscellaneous.E32func(1)                        //类型 1
 	commitData = append(commitData, miscellaneous.E64func(bh)...) //高度
-	r.commitLog(commitData)
+	r.commitLog(1, 0, commitData)
 	logger.Infof("end commit snaplog")
 }
 

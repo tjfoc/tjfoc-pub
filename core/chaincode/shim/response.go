@@ -31,6 +31,7 @@ const (
 )
 
 func Success(payload []byte) pb.Response {
+	usedKV = make(map[string]*singleValue)
 	return pb.Response{
 		Status:  OK,
 		Payload: payload,
@@ -38,6 +39,7 @@ func Success(payload []byte) pb.Response {
 }
 
 func Error(msg string) pb.Response {
+	usedKV = make(map[string]*singleValue)
 	return pb.Response{
 		Status:  ERROR,
 		Message: msg,

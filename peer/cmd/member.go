@@ -64,24 +64,35 @@ func getConn(address string) (*grpc.ClientConn, error) {
 
 func getMemberList() (*ppr.MemberListInfo, error) {
 	var addr string
+	var addrs []string
+	var members *ppr.MemberListInfo
+	var err error
 
 	for _, v := range Config.Members.Peers {
-		if v.Id != Config.Self.Id {
-			s := strings.Split(v.Addr, ":")
-			addr = fmt.Sprintf("%s:%v", s[0], Config.Rpc.Port)
+		if v.Id == Config.Self.Id {
+			continue
+		}
+		s := strings.Split(v.Addr, ":")
+		addr = fmt.Sprintf("%s:%v", s[0], Config.Rpc.Port)
+		addrs = append(addrs, addr)
+		conn, err := getConn(addr)
+		defer conn.Close()
+		if err != nil {
+			continue
+		}
+		c := ppr.NewPeerClient(conn)
+		members, err = c.GetMemberList(context.Background(), &ppr.BlockchainBool{})
+		if err != nil {
+			continue
+		} else {
+			break
 		}
 	}
-	conn, err := getConn(addr)
-	if err != nil {
-		return nil, err
+	if members == nil {
+		return nil, fmt.Errorf("rpc could not GetMemberList from %v", addrs)
 	}
-	defer conn.Close()
-	c := ppr.NewPeerClient(conn)
-	members, err := c.GetMemberList(context.Background(), &ppr.BlockchainBool{})
-	if err != nil {
-		return nil, err
-	}
-	return members, nil
+	return members, err
+
 }
 
 func (p *peer) setMemberList(typ string) error {
@@ -89,6 +100,12 @@ func (p *peer) setMemberList(typ string) error {
 	case "start":
 		if members, err := getMemberList(); err == nil {
 			for _, v := range members.MemberList {
+				//从网络拉取的节点跟本地配置的不一致，以本地为准
+				ckAddr := checkPeerConfig(v.Id)
+				if ckAddr != "" && v.Addr != ckAddr {
+					v.Addr = ckAddr
+				}
+
 				if v.Id != Config.Self.Id {
 					state := 0
 					if v.State != raft.Join {
@@ -115,7 +132,15 @@ func (p *peer) setMemberList(typ string) error {
 		if err != nil {
 			return err
 		}
+
+		logger.Infof("case join self id %s", Config.Self.Id)
 		for _, v := range members.MemberList {
+			//从网络拉取的节点跟本地配置的不一致，以本地为准
+			ckAddr := checkPeerConfig(v.Id)
+			if ckAddr != "" && v.Addr != ckAddr {
+				v.Addr = ckAddr
+			}
+
 			if v.Id != Config.Self.Id {
 				state := 0
 				if v.State != raft.Join {
@@ -152,6 +177,23 @@ func (p *peer) memberListInit() (proto.SP, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	logger.Warningf("save p.memlist")
+	for k, v := range p.memberList {
+		logger.Infof("k:%s v:%s", k, v.Addr)
+	}
+
 	p.blockChain.SaveMemberList(p.memberList)
 	return sp, nil
+}
+
+func checkPeerConfig(ckid string) string {
+	var ckAddr string
+	for _, v := range Config.Members.Peers {
+		if v.Id == ckid {
+			ckAddr = v.Addr
+			break
+		}
+	}
+	return ckAddr
 }

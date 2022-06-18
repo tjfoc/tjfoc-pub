@@ -21,6 +21,7 @@ package worldstate
 import (
 	"crypto/sha256"
 	//"fmt"
+	"errors"
 	"os"
 	"sort"
 	"strconv"
@@ -39,9 +40,16 @@ type transportMes struct {
 	id   string
 	data string
 }
-type checkMes struct {
-	bIndex uint64
-	bHash  string
+
+//type checkMes struct {
+//bIndex uint64
+//bHash  string
+//}
+type pushMes struct {
+	bIndex  uint64
+	bHash   string
+	bData   WorldStateData
+	bAction map[string]int32
 }
 
 type WorldState struct {
@@ -53,22 +61,22 @@ type WorldState struct {
 	initstate     bool                  //是否是初始化状态，初始化状态不能给别人同步数据
 	datamis       bool                  //是否是数据缺失状态
 	inCh          chan *transportMes    //同步数据
-	checkCh       chan *checkMes        //chaincode发送的检查是否能将结果插入数据库的函数
-	pushCh        chan bool             //blockchain发送的要求真正插入数据库
+	pushCh        chan *pushMes         //blockchain发送的要求真正插入数据库
 	updateCh      chan string           //block发送的要求与某个节点进行数据同步
+	//checkCh       chan *checkMes        //chaincode发送的检查是否能将结果插入数据库的函数
 
-	clker      sync.Mutex
-	checkRetCh map[uint64]chan bool
+	//clker      sync.Mutex
+	//isChecking bool
+	//checkRetCh map[uint64]chan bool
+	healthCh chan bool
 
-	plker             sync.Mutex
-	tempPushdata      map[uint64]WorldStateData
-	tempPushdataIndex []uint64
-	isPushing         bool
-	pushRetCh         chan bool
+	plker     sync.Mutex
+	isPushing bool
+	pushRetCh chan int
 
 	ulker       sync.Mutex
-	updateRetCh chan int
 	isUpdating  bool
+	updateRetCh chan int
 }
 
 var wdLogger = flogging.MustGetLogger("worldstate")
@@ -87,19 +95,15 @@ func (w *WorldState) initwd(treeTall uint64, path string, sp tjProto.SP) {
 	w.currentBIndex = 0
 	w.initstate = true
 	w.datamis = false
+
+	w.healthCh = make(chan bool, 5)
 	w.inCh = make(chan *transportMes, 1)
-	w.checkCh = make(chan *checkMes, 1)
-	w.pushCh = make(chan bool, 1)
+	//w.checkCh = make(chan *checkMes, 1)
+	w.pushCh = make(chan *pushMes, 1)
 	w.updateCh = make(chan string, 1)
 
-	w.checkRetCh = make(map[uint64]chan bool, 0)
-	w.tempPushdata = make(map[uint64]WorldStateData, 0)
-	w.tempPushdataIndex = make([]uint64, 0)
-
-	//	w.pushRetCh = make(chan bool, 1)
-
-	w.pushRetCh = make(chan bool, 2)
-
+	//w.checkRetCh = make(map[uint64]chan bool, 0)
+	w.pushRetCh = make(chan int, 1)
 	w.updateRetCh = make(chan int, 1)
 
 	isNew := true
@@ -205,223 +209,261 @@ func (w *WorldState) waitmes() {
 			case MesType_CS:
 				w.recvCompareSuccess(v.id)
 			}
-		case v := <-w.checkCh:
-			w.compareBlockStatehash(v.bIndex, v.bHash)
-		case <-w.pushCh:
-			w.plker.Lock()
-			if len(w.tempPushdataIndex) > 0 {
-				index := w.tempPushdataIndex[0]
-				if data, ok := w.tempPushdata[index]; ok {
-					w.plker.Unlock()
-					w.pushDB(index, data)
-				} else {
-					w.tempPushdataIndex = w.tempPushdataIndex[1:]
-					w.plker.Unlock()
-					w.pushRetCh <- false
-				}
-			} else {
-				w.plker.Unlock()
-				w.pushRetCh <- false
-			}
+		//case v := <-w.checkCh:
+		//w.compareBlockStatehash(v.bIndex, v.bHash)
+		case v := <-w.pushCh:
+			w.pushDB(v.bIndex, v.bHash, v.bData, v.bAction)
 		case peerid := <-w.updateCh:
 			w.requireCompare(peerid)
 		}
 	}
 }
+
+/*
 func (w *WorldState) Check(index uint64, compareRoothash string, wd WorldStateData) (status bool) {
-	var tempCh chan bool
 	w.plker.Lock()
 	if w.isPushing {
 		w.plker.Unlock()
-		wdLogger.Error("Cant do check when pushing last block data!")
+		wdLogger.Error("Cant do check when system is pushing block!")
 		return false
 	}
-	w.plker.Unlock()
+	w.plker.Lock()
+	w.ulker.Lock()
+	if w.isUpdating {
+		w.ulker.Unlock()
+		wdLogger.Error("Cant do check when system is updating data!")
+		return false
+	}
+	w.ulker.Unlock()
+	var tempCh chan bool
 	w.clker.Lock()
+	if w.isChecking {
+		w.clker.Unlock()
+		wdLogger.Error("Cant check data when system is checking block!")
+		return false
+	}
 	if _, ok := w.checkRetCh[index]; !ok {
 		w.checkRetCh[index] = make(chan bool, 1)
 		tempCh = w.checkRetCh[index]
+		w.checkCh <- &checkMes{
+			bIndex: index,
+			bHash:  compareRoothash,
+		}
+		w.isChecking = true
 		w.clker.Unlock()
 	} else {
 		w.clker.Unlock()
 		return false
-	}
-	w.checkCh <- &checkMes{
-		bIndex: index,
-		bHash:  compareRoothash,
 	}
 	status = <-tempCh
 	close(tempCh)
 	w.clker.Lock()
 	delete(w.checkRetCh, index)
+	w.isChecking = false
 	w.clker.Unlock()
-	if status {
-		w.plker.Lock()
-		w.tempPushdataIndex = append(w.tempPushdataIndex, index)
-		w.tempPushdata[index] = wd
-		w.plker.Unlock()
-	}
 	return
 }
-func (w *WorldState) compareBlockStatehash(bIndex uint64, leaderRoothash string) {
+*/
+
+func (w *WorldState) compareBlockStatehash(bIndex uint64, leaderRoothash string) int {
 	wdLogger.Info("wd:Check Push!index:", bIndex)
 	if w.datamis == true {
-		w.checkRetCh[bIndex] <- false
-		return
+		//w.checkRetCh[bIndex] <- false
+		return 1
 	}
 	if bIndex == w.currentBIndex {
 		if w.bTree.GetRootHash() == leaderRoothash {
 			wdLogger.Info("wd:check success!")
-			w.checkRetCh[bIndex] <- true
-			return
+			//w.checkRetCh[bIndex] <- true
+			return 0
 		} else {
 			wdLogger.Error("wd:same index but different hash!bad node!bad node!")
 			w.datamis = true
-			w.checkRetCh[bIndex] <- false
-			return
+			//w.checkRetCh[bIndex] <- false
+			return 4
 		}
 	} else {
 		if bIndex > w.currentBIndex {
 			wdLogger.Info("wd:worldstate is lag!")
 			w.datamis = true
-			w.checkRetCh[bIndex] <- false
-			return
+			//w.checkRetCh[bIndex] <- false
+			return 3
 		} else {
 			wdLogger.Info("wd:worldstate is newer then the push data")
 			w.datamis = true
-			w.checkRetCh[bIndex] <- false
-			return
+			//w.checkRetCh[bIndex] <- false
+			return 2
 		}
 	}
 }
-func (w *WorldState) Push() bool {
+
+func (w *WorldState) Push(index uint64, hash string, kv map[string]string, action map[string]int32) (status int) {
+	/*
+		w.clker.Lock()
+		if w.isChecking {
+			w.clker.Unlock()
+			wdLogger.Error("Cant push data when system is checking block!")
+		}
+		w.clker.Unlock()
+	*/
+	w.ulker.Lock()
+	if w.isUpdating {
+		w.ulker.Unlock()
+		wdLogger.Error("Cant push data when system is updating data!")
+		return 0
+	}
+	w.ulker.Unlock()
+
 	w.plker.Lock()
-	if !w.isPushing {
-		w.isPushing = true
-		w.pushCh <- true
-	} else {
+	if w.isPushing {
 		w.plker.Unlock()
-		return false
+		wdLogger.Error("Cant push data when system is pushing block!")
+		return 0
+	}
+	w.isPushing = true
+	w.pushCh <- &pushMes{
+		bIndex:  index,
+		bHash:   hash,
+		bData:   kv,
+		bAction: action,
 	}
 	w.plker.Unlock()
-	v := <-w.pushRetCh
+
+	status = <-w.pushRetCh
+
 	w.plker.Lock()
 	w.isPushing = false
 	w.plker.Unlock()
-	return v
+	w.healthCh <- true
+	return
 }
-func (w *WorldState) pushDB(bIndex uint64, wd WorldStateData) {
+func (w *WorldState) pushDB(bIndex uint64, bHash string, wd WorldStateData, action map[string]int32) {
 	wdLogger.Info("wd:start push!Index:", bIndex)
-	if len(wd) == 0 {
+	r := w.compareBlockStatehash(bIndex, bHash)
+	if r != 0 {
+		w.pushRetCh <- r
+		return
+	}
+	if w.isPushing {
+		if len(wd) == 0 {
+			w.currentBIndex++
+			w.batch.Put([]byte("currentBIndex"), []byte(strconv.FormatUint(w.currentBIndex, 10)))
+			err := w.db.Write(w.batch, nil)
+			w.batch.Reset()
+			if err != nil {
+				wdLogger.Error("wd:push failed!")
+				w.pushRetCh <- 5
+			} else {
+				wdLogger.Info("wd:push success!")
+				w.initstate = false
+				w.datamis = false
+				w.pushRetCh <- 0
+			}
+			return
+		}
+		bIndexM := make(map[uint64]WorldStateData, 0)
+		for k, v := range wd {
+			tempIndex := w.bkdrhash(k)
+			v1, ok := bIndexM[tempIndex]
+			if !ok {
+				v1 = make(WorldStateData, 0)
+				bIndexM[tempIndex] = v1
+			}
+			v1[k] = v
+			bIndexM[tempIndex] = v1
+		}
+		bH := make(map[uint64]string)
+		for i, v := range bIndexM {
+			KeysB, _ := w.db.Get([]byte(strconv.FormatUint(i, 10)+"_keys"), nil)
+			tempKeys := &Keys{}
+			proto.Unmarshal(KeysB, tempKeys)
+			tempKv := make(map[string]string, 0)
+			for _, key := range tempKeys.Key {
+				valueB, _ := w.db.Get([]byte(key), nil)
+				tempKv[key] = string(valueB)
+			}
+			for k1, v1 := range v {
+				act, _ := action[k1]
+				switch act {
+				case DELACTION:
+					//删除
+					w.batch.Delete([]byte(k1))
+					for i, ii := range tempKeys.Key {
+						if ii == k1 {
+							tempKeys.Key = append(tempKeys.Key[:i], tempKeys.Key[i+1:]...)
+							break
+						}
+					}
+					delete(tempKv, k1)
+				case PUTACTION:
+					//修改或增加
+					w.batch.Put([]byte(k1), []byte(v1))
+					_, ok := tempKv[k1]
+					if !ok {
+						tempKeys.Key = append(tempKeys.Key, k1)
+					}
+					tempKv[k1] = v1
+				}
+			}
+			sort.Strings(tempKeys.Key)
+			lalala := ""
+			for _, key := range tempKeys.Key {
+				lalala += key
+				lalala += tempKv[key]
+			}
+			encoder := sha256.New()
+			encoder.Write([]byte(lalala))
+			newHash := encoder.Sum(nil)
+			bH[i] = string(newHash)
+			w.batch.Put([]byte(strconv.FormatUint(i, 10)), newHash)
+			KeysB, _ = proto.Marshal(tempKeys)
+			w.batch.Put([]byte(strconv.FormatUint(i, 10)+"_keys"), KeysB)
+		}
 		w.currentBIndex++
 		w.batch.Put([]byte("currentBIndex"), []byte(strconv.FormatUint(w.currentBIndex, 10)))
 		err := w.db.Write(w.batch, nil)
 		w.batch.Reset()
-		//删除push数据
-		w.plker.Lock()
-		w.tempPushdataIndex = w.tempPushdataIndex[1:]
-		delete(w.tempPushdata, bIndex)
-		w.plker.Unlock()
 		if err != nil {
 			wdLogger.Info("wd:push failed!")
-			w.pushRetCh <- false
+			w.pushRetCh <- 5
 		} else {
 			wdLogger.Info("wd:push success!")
 			w.initstate = false
 			w.datamis = false
-			w.pushRetCh <- true
-		}
-		return
-	}
-	bIndexM := make(map[uint64]WorldStateData, 0)
-	for k, v := range wd {
-		tempIndex := w.bkdrhash(k)
-		v1, ok := bIndexM[tempIndex]
-		if !ok {
-			v1 = make(WorldStateData, 0)
-			bIndexM[tempIndex] = v1
-		}
-		v1[k] = v
-		bIndexM[tempIndex] = v1
-	}
-	bH := make(map[uint64]string)
-	for i, v := range bIndexM {
-		KeysB, _ := w.db.Get([]byte(strconv.FormatUint(i, 10)+"_keys"), nil)
-		tempKeys := &Keys{}
-		proto.Unmarshal(KeysB, tempKeys)
-		tempKv := make(map[string]string, 0)
-		for _, key := range tempKeys.Key {
-			valueB, _ := w.db.Get([]byte(key), nil)
-			tempKv[key] = string(valueB)
-		}
-		for k1, v1 := range v {
-			if v1 == "" {
-				//删除
-				w.batch.Delete([]byte(k1))
-				for i, ii := range tempKeys.Key {
-					if ii == k1 {
-						tempKeys.Key = append(tempKeys.Key[:i], tempKeys.Key[i+1:]...)
-						break
-					}
-				}
-				delete(tempKv, k1)
-			} else {
-				//修改或增加
-				w.batch.Put([]byte(k1), []byte(v1))
-				_, ok := tempKv[k1]
-				if !ok {
-					tempKeys.Key = append(tempKeys.Key, k1)
-				}
-				tempKv[k1] = v1
+			for i, v := range bH {
+				w.bTree.UpdateSingle(i, v)
 			}
+			w.pushRetCh <- 0
 		}
-		sort.Strings(tempKeys.Key)
-		lalala := ""
-		for _, key := range tempKeys.Key {
-			lalala += key
-			lalala += tempKv[key]
-		}
-		encoder := sha256.New()
-		encoder.Write([]byte(lalala))
-		newHash := encoder.Sum(nil)
-		bH[i] = string(newHash)
-		w.batch.Put([]byte(strconv.FormatUint(i, 10)), newHash)
-		KeysB, _ = proto.Marshal(tempKeys)
-		w.batch.Put([]byte(strconv.FormatUint(i, 10)+"_keys"), KeysB)
-	}
-	w.currentBIndex++
-	w.batch.Put([]byte("currentBIndex"), []byte(strconv.FormatUint(w.currentBIndex, 10)))
-	err := w.db.Write(w.batch, nil)
-	w.batch.Reset()
-	//删除push数据
-	w.plker.Lock()
-	w.tempPushdataIndex = w.tempPushdataIndex[1:]
-	delete(w.tempPushdata, bIndex)
-	w.plker.Unlock()
-	if err != nil {
-		wdLogger.Info("wd:push failed!")
-		w.pushRetCh <- false
-	} else {
-		wdLogger.Info("wd:push success!")
-		w.initstate = false
-		w.datamis = false
-		for i, v := range bH {
-			w.bTree.UpdateSingle(i, v)
-		}
-		w.pushRetCh <- true
 	}
 	return
 }
 func (w *WorldState) Update(peerid string) int {
+	/*
+		w.clker.Lock()
+		if w.isChecking {
+			w.clker.Unlock()
+			wdLogger.Error("Cant update data when system is checking block!")
+		}
+		w.clker.Unlock()
+	*/
+	w.plker.Lock()
+	if w.isPushing {
+		w.plker.Unlock()
+		wdLogger.Error("Cant update data when system is pushing data!")
+	}
+	w.plker.Lock()
+
 	w.ulker.Lock()
-	if !w.isUpdating {
-		w.isUpdating = true
+	if w.isUpdating {
 		w.ulker.Unlock()
-	} else {
-		w.ulker.Unlock()
+		wdLogger.Error("Cant update data when system is updating data!")
 		return 0
 	}
+	w.isUpdating = true
 	w.updateCh <- peerid
+	w.ulker.Unlock()
+
 	tker := time.NewTicker(10 * time.Second)
 	select {
 	case <-tker.C:
@@ -436,6 +478,7 @@ func (w *WorldState) Update(peerid string) int {
 		return v
 	}
 }
+
 func (w *WorldState) updateDB(bIndex uint64, wdM map[uint64]WorldStateData, bHM map[uint64]string, keysB map[uint64]string) {
 	w.ulker.Lock()
 	if w.isUpdating {
@@ -443,6 +486,14 @@ func (w *WorldState) updateDB(bIndex uint64, wdM map[uint64]WorldStateData, bHM 
 		wdLogger.Info("wd:start update!")
 		if bIndex > w.currentBIndex || (bIndex == w.currentBIndex && w.datamis) {
 			for i, v := range wdM {
+
+				old, _ := w.db.Get([]byte(strconv.FormatUint(i, 10)+"_keys"), nil)
+				oldKeys := &Keys{}
+				proto.Unmarshal(old, oldKeys)
+				for _, v := range oldKeys.Key {
+					w.batch.Delete([]byte(v))
+				}
+
 				for k1, v1 := range v {
 					w.batch.Put([]byte(k1), []byte(v1))
 				}
@@ -455,7 +506,7 @@ func (w *WorldState) updateDB(bIndex uint64, wdM map[uint64]WorldStateData, bHM 
 			w.batch.Reset()
 			if err != nil {
 				wdLogger.Info("wd:update failed!")
-				w.updateRetCh <- 0
+				w.updateRetCh <- 4
 			} else {
 				wdLogger.Info("wd:update success!")
 				w.datamis = false
@@ -466,12 +517,16 @@ func (w *WorldState) updateDB(bIndex uint64, wdM map[uint64]WorldStateData, bHM 
 				w.updateRetCh <- 1
 			}
 		} else {
-			wdLogger.Info("wd:update failed!")
+			wdLogger.Error("wd:update failed!")
 			w.updateRetCh <- 0
 		}
 	} else {
 		w.ulker.Unlock()
 	}
+}
+
+func (w *WorldState) GetHealthCh() chan bool {
+	return w.healthCh
 }
 
 func (w *WorldState) makeCompareMes() *CompareMes {
@@ -689,9 +744,31 @@ func (w *WorldState) GetRootHash() string {
 	return w.bTree.GetRootHash()
 }
 func (w *WorldState) Search(k string) SearchResult {
+	i := w.bkdrhash(k)
+	KeysB, _ := w.db.Get([]byte(strconv.FormatUint(i, 10)+"_keys"), nil)
+	tempKeys := &Keys{}
+	proto.Unmarshal(KeysB, tempKeys)
+	isFind := false
+	for _, kk := range tempKeys.Key {
+		if k == kk {
+			isFind = true
+			break
+		}
+	}
+	if !isFind {
+		return SearchResult{
+			Key:   k,
+			Value: "",
+			Err:   errors.New("Key does not exist!"),
+		}
+	}
 	data, err := w.db.Get([]byte(k), nil)
 	v := string(data)
-	return SearchResult{Key: k, Value: v, Err: err}
+	return SearchResult{
+		Key:   k,
+		Value: v,
+		Err:   err,
+	}
 }
 func (w *WorldState) Searchn(key []string) (res []SearchResult) {
 	for _, k := range key {

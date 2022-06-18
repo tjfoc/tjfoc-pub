@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package monitor;
+
+import "privateTransaction.proto";
+
+message Result{
+  bool req = 1;
+}
+
+//该结构用于查询一个加密的kv
+message TransactionKey {
+    bytes key =1;//请求查询的key
+	bytes value = 2;//返回的key对应的值
+	bytes status = 3;//返回的本次查询的状态（出错为出错信息，正确则为nil）
+    bytes txId = 4;//交易ID
+	bytes peerID = 5;//节点ID
+	bytes randNum = 6;//用于验证身份的随机数
+	bytes sign = 7;//对随机数进行的签名
+	bytes secretvalue = 8;//密文
+}
+
+//该结构用于隐私交易双方执行完成之后扩散隐私交易结果
+message TransactionResults{
+    map<string,bytes> kv = 1;//隐私交易结果
+	map<string,int32> action = 2;//隐私交易中导致kv变化的动作
+    bytes txId = 3;//该隐私交易的交易id
+}
+
+//该结构用于整个block交易执行结束后，对需要进行加密的key进行加密处理
+message DealResults{
+	map<string,bytes> kv = 1;//所有需要进行对称加密的kv
+	map<string,bool> tongtai = 2;//对称加密之前是否需要先进行同态解密
+	bytes peerID = 3;//节点的id
+}
+
+//改结构用于在执行同态加减法时，将需要加上或者减去的明文数值转换为同态加密数值
+message CryptNumber{
+	bytes txId = 1;//该交易的交易ID
+	int64 value = 2;//需要加密的值（是否是int64类型以后再改）
+	bytes svalue = 3;//加密之后的值
+}
+
+//加密过的(100) - 没有加密过的1000
+message CompareNumber{
+	bytes txId = 1;//该交易的交易id
+	bytes svalue = 2;//需要被减的值，加密过的100
+	int64 value = 3;//减去的值，没加密的1000
+	int64 result = 4;//比较结果 0相等 -1小于（前面的小于后面的）1大于（前面的大于后面的）
+}
+
+service Monitor{
+    rpc NewTransaction(privateTransaction.Transaction) returns(privateTransaction.Transaction){};
+	//用于查询key对应的value
+    rpc QueryKey(TransactionKey) returns(TransactionKey){};
+    rpc Authentication(TransactionKey) returns(TransactionKey){};
+	//用于扩散隐私交易结果
+    rpc SendTxResult(TransactionResults) returns(Result){};
+    rpc GetTxResult(TransactionResults) returns(TransactionResults){};
+	//用于对整个block中需要进行加密的key进行加密
+	rpc SendTotalTxResult(DealResults) returns(DealResults){};
+	//用于对某个明文数值进行同态加密
+	rpc RequireCrypt(CryptNumber) returns(CryptNumber){};
+	//用于比较
+	rpc RequireCompare(CompareNumber) returns(CompareNumber){};
+}

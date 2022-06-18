@@ -20,12 +20,14 @@ import (
 	"github.com/tjfoc/tjfoc/core/crypt"
 	"github.com/tjfoc/tjfoc/core/merkle"
 	"github.com/tjfoc/tjfoc/core/miscellaneous"
+	pb "github.com/tjfoc/tjfoc/protos/transaction"
 )
 
-func newheader(version uint32, timestamp uint64) *transactionHeader {
+func newheader(version uint32, timestamp uint64, privacy uint32) *transactionHeader {
 	return &transactionHeader{
 		version:   version,
 		timestamp: timestamp,
+		privacy:   privacy,
 	}
 }
 
@@ -50,11 +52,26 @@ func News() *Transactions {
 	return &Transactions{}
 }
 
-func New(smartContract []byte, smartContractArgs [][]byte, version uint32, timestamp uint64) *Transaction {
-	return &Transaction{
-		header:        newheader(version, timestamp),
-		smartContract: newSmartContract(smartContract, smartContractArgs),
+// func New(smartContract []byte, smartContractArgs [][]byte, version uint32, timestamp uint64) *Transaction {
+// 	return &Transaction{
+// 		header:        newheader(version, timestamp),
+// 		smartContract: newSmartContract(smartContract, smartContractArgs),
+// 	}
+// }
+
+func New(nodes []*pb.Node, deal []byte, privacy uint32, version uint32, timestamp uint64) (*Transaction, error) {
+	tx := &Transaction{
+		header: newheader(version, timestamp, privacy),
+		txdeal: &transactionDeal{deal: deal},
 	}
+	txpeers := transactionPeers{}
+	if nodes != nil {
+		for _, p := range nodes {
+			txpeers = append(txpeers, transactionPeer{p.Id, p.Key})
+		}
+	}
+	tx.txpeers = &txpeers
+	return tx, nil
 }
 
 func (a *Transactions) AddTransaction(b *Transaction) error {
@@ -99,7 +116,13 @@ func (a *Transaction) Hash(c crypt.Crypto) ([]byte, error) {
 	} else {
 		buf = append(buf, tmp...)
 	}
-	if tmp, err := a.smartContract.Show(); err != nil {
+	if tmp, err := a.txpeers.Show(); err != nil {
+		return []byte{}, err
+	} else {
+		buf = append(buf, tmp...)
+	}
+
+	if tmp, err := a.txdeal.Show(); err != nil {
 		return []byte{}, err
 	} else {
 		buf = append(buf, tmp...)
@@ -114,7 +137,12 @@ func (a *Transaction) Sign(c crypt.Crypto) error {
 	} else {
 		buf = append(buf, tmp...)
 	}
-	if tmp, err := a.smartContract.Show(); err != nil {
+	if tmp, err := a.txpeers.Show(); err != nil {
+		return err
+	} else {
+		buf = append(buf, tmp...)
+	}
+	if tmp, err := a.txdeal.Show(); err != nil {
 		return err
 	} else {
 		buf = append(buf, tmp...)
@@ -134,7 +162,12 @@ func (a *Transaction) Verify(c crypt.Crypto) bool {
 	} else {
 		buf = append(buf, tmp...)
 	}
-	if tmp, err := a.smartContract.Show(); err != nil {
+	if tmp, err := a.txpeers.Show(); err != nil {
+		return false
+	} else {
+		buf = append(buf, tmp...)
+	}
+	if tmp, err := a.txdeal.Show(); err != nil {
 		return false
 	} else {
 		buf = append(buf, tmp...)

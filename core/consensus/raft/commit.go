@@ -5,17 +5,23 @@ import (
 	"time"
 )
 
-type commitLog struct {
+type commit struct {
 	commitCh chan bool
-	logs     [][]byte
+	logs     []commitLog
 	lock     sync.Mutex
 
 	commitFun commitLogFunc
 	block     interface{}
 }
 
-func newCommitLog(block interface{}, commitFun commitLogFunc) *commitLog {
-	cmtlog := &commitLog{
+type commitLog struct {
+	commitIndex uint64
+	typ         uint32 //0-普通日志；1-快照；2-节点变更
+	log         []byte
+}
+
+func newCommit(block interface{}, commitFun commitLogFunc) *commit {
+	cmtlog := &commit{
 		commitCh:  make(chan bool, 1024),
 		block:     block,
 		commitFun: commitFun,
@@ -23,7 +29,7 @@ func newCommitLog(block interface{}, commitFun commitLogFunc) *commitLog {
 	return cmtlog
 }
 
-func (c *commitLog) commitProcess() {
+func (c *commit) commitProcess() {
 	for {
 		select {
 		case <-c.commitCh:
@@ -35,13 +41,19 @@ func (c *commitLog) commitProcess() {
 			c.lock.Unlock()
 
 			for i := 0; i < j; i++ {
-				log := c.logs[i]
+				cmtlog := c.logs[i]
 				t1 := time.Now()
-				c.commitFun(c.block, log)
+				c.commitFun(c.block, cmtlog.log)
 				t := time.Now().Sub(t1)
-				if t.Seconds() > 1 {
-					logger.Warningf("exec commitFun take long time %v", t)
+				switch cmtlog.typ {
+				case 0:
+					logger.Infof("commitFun take %v commitIndex:%d ", t, cmtlog.commitIndex)
+				case 1:
+					logger.Infof("commitFun snapshootlog take %v", t)
+				case 2:
+					logger.Infof("commitFun updatePeer take %v", t)
 				}
+				logger.Infof("---------------------------[%d/%d]-------------------------------", (i + 1), j)
 			}
 
 			c.lock.Lock()
@@ -56,9 +68,10 @@ func (c *commitLog) commitProcess() {
 	}
 }
 
-func (c *commitLog) execCommitLog(log []byte) {
+func (c *commit) execCommitLog(log commitLog) {
 	c.lock.Lock()
 	c.logs = append(c.logs, log)
+	logger.Infof("add commit notice, waiting for commit:%d", len(c.logs))
 	c.lock.Unlock()
 	if len(c.commitCh) < 1024 {
 		c.commitCh <- true

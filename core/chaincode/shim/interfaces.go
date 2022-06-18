@@ -37,6 +37,9 @@ type Chaincode interface {
 // ChaincodeStubInterface is used by deployable chaincode apps to access and
 // modify their ledgers
 type ChaincodeStubInterface interface {
+	Add(key string, originvalue []byte, dealvalue int64) ([]byte, error)
+	Sub(key string, originvalue []byte, dealvalue int64) ([]byte, error)
+	Cmp(key string, originvalue []byte, dealvalue int64) (int64, error)
 	// GetArgs returns the arguments intended for the chaincode Init and Invoke
 	// as an array of byte arrays.
 	GetArgs() [][]byte
@@ -47,20 +50,20 @@ type ChaincodeStubInterface interface {
 
 	// If the key does not exist in the state database, (nil, nil) is returned.
 	GetState(key string) ([]byte, error)
-	GetStaten(keyn []string) (map[string]string, error)
+	GetStaten(keyn []string) (map[string][]byte, error)
 
 	//The key and its value will be deleted from the ledger
 	DelState(key string) error
 	DelStaten(keyn []string) error
 
 	//模糊匹配:key前缀查询
-	GetStateByPrefix(key string) (map[string]string, error)
+	GetStateByPrefix(key string) (map[string][]byte, error)
 	//GetStateByRange
 
 	// 存储key-value
 	PutState(key string, value []byte) error
 	//合约调用合约
-	InvokeChaincode(chaincodeName string, chaincodeVersion string, args [][]byte) pb.Response
+	//InvokeChaincode(chaincodeName string, chaincodeVersion string, args [][]byte) pb.Response
 
 	// GetHistoryForKey随时间返回键值的历史记录。
 	// 对于每个历史的key更新，都会返回历史值和关联的交易ID和时间戳。时间戳是客户端在提案标题中提供的时间戳。
