@@ -1,0 +1,10 @@
+package check
+
+import("fmt")
+import
+("time")
+
+func abc() {
+	fmt.Println("2")
+  go func()
+}

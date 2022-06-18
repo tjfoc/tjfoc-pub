@@ -1,0 +1,60 @@
+PackTime: 1000
+Typ: "init"
+Admin: "5U8r2mWJF1STKHAFEPMn4WiQgXrYa4XuhHwrm2x1ax7xSjBzPbjT2NuJbVcnXSt2ohkvqJ7Y5jUmXxKMoHBLVg34"
+Log:
+    Level: "Info"
+    LogDir: ""
+    LogFile: ""
+Rpc:
+    Port: 9002
+    Timeout: 50
+    UseTLS: false
+    TLSCaPath: "./crypt/ca.pem"
+    TLSKeyPath: "./crypt/priv0.pem"
+    TLSCertPath: "./crypt/cert0.pem"
+    TLSServerName: "test.example.com"
+Block:
+    PackTimeout: 1000
+Node:
+    NodeCertPath: "./cert/nodeCert.pem"
+    NodeKeyPath: "./cert/nodeKey.pem"
+    RootCertPath: "./cert/root.pem"
+StorePath:
+    Path: "peer.db"
+    WorldStatePath: "worldstate.db"
+Crypt:
+    KeyTyp: "sm2"
+    HashTyp: "sm3"
+    KeyPath: "./crypt/key.pem"
+Docker:
+    Ip: "0.0.0.0"
+    Port: "7052"
+    Endpoint: "unix:///var/run/docker.sock"
+    BaseImage: "tjfoc/tjfoc-ccenv"
+    Version: "0.9"
+    Loglevel: "ERROR"
+Chaincode:
+    Timeout: 120s
+Self:
+    Id: "2"
+    Addr: "0.0.0.0:60002"
+Raft:
+    HeartBeat: 1000
+    VoteTimeout: 2000
+    RandBase: 2000
+    RandFactor: 2000
+Members:
+    Port: 60001
+    P2P:
+        Cycle: 3000
+    Peers:
+        - Id: "1"
+          Addr: "0.0.0.0:60001"
+        - Id: "2"
+          Addr: "0.0.0.0:60002"
+        - Id: "3"
+          Addr: "0.0.0.0:60003"
+        - Id: "4"
+          Addr: "0.0.0.0:60004"
+        - Id: "5"
+          Addr: "0.0.0.0:60005"

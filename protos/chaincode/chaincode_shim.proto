@@ -1,0 +1,47 @@
+
+syntax = "proto3";
+
+package chaincode;
+
+import "chaincode.proto";
+
+message ChaincodeMessage {
+    enum Type {
+        UNDEFINED = 0;
+        REGISTER = 1;
+        REGISTERED = 2;
+        INIT = 3;
+        READY = 4;
+        TRANSACTION = 5;
+        COMPLETED = 6;
+        ERROR = 7;
+        GET_STATE = 8;
+        PUT_STATE = 9;
+        DEL_STATE = 10;
+        INVOKE_CHAINCODE = 11;
+        RESPONSE = 13;
+        GET_STATE_BY_RANGE = 14;
+        GET_QUERY_RESULT = 15;
+        QUERY_STATE_NEXT = 16;
+        QUERY_STATE_CLOSE = 17;
+        KEEPALIVE = 18;
+        GET_HISTORY_FOR_KEY = 19;
+        GET_STATEN = 20;
+        DEL_STATEN = 21;
+        GET_STATE_BY_PREFIX = 22;
+		CC_PANIC = 23;
+    }
+    Type type = 1;
+    bytes payload = 3;
+    string txid = 4;
+    ChaincodeEvent chaincode_event = 6;
+}
+
+message PutStateInfo {
+    string key = 1;
+    bytes value = 2;
+}
+
+service ChaincodeSupport {
+    rpc Register(stream ChaincodeMessage) returns (stream ChaincodeMessage) {}
+}

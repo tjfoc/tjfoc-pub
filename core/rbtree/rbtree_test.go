@@ -1,24 +1,21 @@
 package rbtree
 
 import (
-	"core/typeclass"
 	"fmt"
-	"strconv"
 	"testing"
+
+	"github.com/tjfoc/tjfoc/core/typeclass"
 )
 
 type TestInt int
 
-func intPrint(a interface{}) interface{} {
-	v, ok := a.(TestInt)
-	if ok {
-		fmt.Printf("%s\n", v.Show())
-	}
+func intPrint(a interface{}, b interface{}) interface{} {
+	fmt.Printf("%v\n", b)
 	return a
 }
 
 func Test(t *testing.T) {
-	tree := RBtreeNew()
+	tree := New()
 	for i := 0; i < 100; i++ {
 		tree.Insert(TestInt(i))
 	}
@@ -26,7 +23,7 @@ func Test(t *testing.T) {
 		tree.Remove(TestInt(i))
 	}
 	fmt.Printf("Update = %v\n", tree.Update(TestInt(4), TestInt(5)))
-	tree.Map(intPrint)
+	tree.Foldl(intPrint, TestInt(1))
 }
 
 func (a TestInt) Eq(b typeclass.Eq) bool {
@@ -51,8 +48,4 @@ func (a TestInt) LessThan(b typeclass.Ord) bool {
 
 func (a TestInt) MoreThan(b typeclass.Ord) bool {
 	return !a.LessThan(b)
-}
-
-func (a TestInt) Show() string {
-	return strconv.FormatInt(int64(a), 10)
 }

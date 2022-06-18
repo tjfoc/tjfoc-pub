@@ -1,5 +1,20 @@
+/*
+Copyright Suzhou Tongji Fintech Research Institute 2018 All Rights Reserved.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 package rbtree
 
+// combined into a new tree
 func T(color Color, left, node, right *RBtreeNode) *RBtreeNode {
 	node.left = left
 	node.right = right
@@ -7,10 +22,16 @@ func T(color Color, left, node, right *RBtreeNode) *RBtreeNode {
 	return node
 }
 
-func RBtreeNew() *RBtree {
+// create a new tree
+func New() *RBtree {
 	return &RBtree{nil}
 }
 
+func (a *RBtree) Nodes() int {
+	return a.tree.nodes()
+}
+
+// find a node
 func (a *RBtree) Elem(node TreeNode) TreeNode {
 	treeNode := a.tree.elem(node)
 	if treeNode == nil {
@@ -19,23 +40,27 @@ func (a *RBtree) Elem(node TreeNode) TreeNode {
 	return treeNode.node
 }
 
+// update a node
 func (a *RBtree) Update(old, new TreeNode) bool {
 	treeNode := a.tree.elem(old)
 	if treeNode == nil {
-		return false
+		return a.Insert(new)
 	}
 	treeNode.node = new
 	return true
 }
 
+// insert a node
 func (a *RBtree) Insert(node TreeNode) bool {
 	return a.InsertP(&node)
 }
 
+// remove a node
 func (a *RBtree) Remove(node TreeNode) bool {
 	return a.RemoveP(&node)
 }
 
+// insert a node by pointer
 func (a *RBtree) InsertP(node *TreeNode) bool {
 	a.tree = a.tree.insert(&RBtreeNode{
 		bbtag: false,
@@ -47,6 +72,7 @@ func (a *RBtree) InsertP(node *TreeNode) bool {
 	return true
 }
 
+// remove a node by pointer
 func (a *RBtree) RemoveP(node *TreeNode) bool {
 	a.tree = a.tree.remove(&RBtreeNode{
 		bbtag: false,
@@ -58,18 +84,22 @@ func (a *RBtree) RemoveP(node *TreeNode) bool {
 	return true
 }
 
+// check a node is empty
 func (a *RBtreeNode) isEmpty() bool {
 	return a == nil
 }
 
+// check a node is bb empty
 func (a *RBtreeNode) isBBEmpty() bool {
 	return a != nil && a.bbtag
 }
 
+// check a tree a empty
 func (a *RBtree) isEmpty() bool {
 	return a == nil || a.tree.isEmpty()
 }
 
+// return the min node
 func (a *RBtreeNode) min() *RBtreeNode {
 	if a.isEmpty() || a.left.isEmpty() {
 		return a
@@ -77,6 +107,14 @@ func (a *RBtreeNode) min() *RBtreeNode {
 	return a.left.min()
 }
 
+func (a *RBtreeNode) nodes() int {
+	if a.isEmpty() {
+		return 0
+	}
+	return 1 + a.left.nodes() + a.right.nodes()
+}
+
+// find node
 func (a *RBtreeNode) elem(node TreeNode) *RBtreeNode {
 	if a.isEmpty() {
 		return nil
@@ -90,6 +128,7 @@ func (a *RBtreeNode) elem(node TreeNode) *RBtreeNode {
 	return a.right.elem(node)
 }
 
+// dyed the node in black
 func (a *RBtreeNode) makeblack() *RBtreeNode {
 	if a.isEmpty() || a.isBBEmpty() {
 		return nil
@@ -98,6 +137,7 @@ func (a *RBtreeNode) makeblack() *RBtreeNode {
 	return a
 }
 
+// dyed the node in black or double black
 func (a *RBtreeNode) makeblack1() *RBtreeNode {
 	if a.isEmpty() {
 		return &RBtreeNode{
@@ -113,14 +153,17 @@ func (a *RBtreeNode) makeblack1() *RBtreeNode {
 	return a
 }
 
+// insert a node
 func (a *RBtreeNode) insert(node *RBtreeNode) *RBtreeNode {
 	return ins(a, node).makeblack()
 }
 
+// remove a node
 func (a *RBtreeNode) remove(node *RBtreeNode) *RBtreeNode {
 	return del(a, node).makeblack()
 }
 
+// insert a node
 func ins(a, node *RBtreeNode) *RBtreeNode {
 	if a.isEmpty() {
 		return T(R, nil, node, nil)
@@ -135,6 +178,7 @@ func ins(a, node *RBtreeNode) *RBtreeNode {
 	}
 }
 
+// remove a node
 func del(a, node *RBtreeNode) *RBtreeNode {
 	if a.isEmpty() {
 		return a
@@ -162,6 +206,7 @@ func del(a, node *RBtreeNode) *RBtreeNode {
 	}
 }
 
+// "=" operation
 func (a *RBtreeNode) set(b *RBtreeNode) bool {
 	if b == nil {
 		return false
@@ -170,6 +215,7 @@ func (a *RBtreeNode) set(b *RBtreeNode) bool {
 	return true
 }
 
+// balance the tree
 func balance(color Color, l, a, r *RBtreeNode) *RBtreeNode {
 	var t RBtreeNode
 
@@ -190,6 +236,7 @@ func balance(color Color, l, a, r *RBtreeNode) *RBtreeNode {
 	return T(color, l, a, r)
 }
 
+// balance the tree
 func fixdb(color Color, l, a, r *RBtreeNode) *RBtreeNode {
 	var t, t1 RBtreeNode
 

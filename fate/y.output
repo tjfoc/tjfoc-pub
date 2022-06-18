@@ -1,0 +1,95 @@
+
+state 0
+	$accept: .program $end 
+	statement: .    (4)
+
+	SET  shift 4
+	GET  shift 5
+	.  reduce 4 (src line 20)
+
+	program  goto 1
+	statementlist  goto 2
+	statement  goto 3
+
+state 1
+	$accept:  program.$end 
+
+	$end  accept
+	.  error
+
+
+state 2
+	program:  statementlist.    (1)
+	statementlist:  statementlist.';' statement 
+
+	';'  shift 6
+	.  reduce 1 (src line 15)
+
+
+state 3
+	statementlist:  statement.    (2)
+
+	.  reduce 2 (src line 17)
+
+
+state 4
+	statement:  SET.DATA DATA 
+
+	DATA  shift 7
+	.  error
+
+
+state 5
+	statement:  GET.DATA 
+
+	DATA  shift 8
+	.  error
+
+
+state 6
+	statementlist:  statementlist ';'.statement 
+	statement: .    (4)
+
+	SET  shift 4
+	GET  shift 5
+	.  reduce 4 (src line 20)
+
+	statement  goto 9
+
+state 7
+	statement:  SET DATA.DATA 
+
+	DATA  shift 10
+	.  error
+
+
+state 8
+	statement:  GET DATA.    (6)
+
+	.  reduce 6 (src line 22)
+
+
+state 9
+	statementlist:  statementlist ';' statement.    (3)
+
+	.  reduce 3 (src line 18)
+
+
+state 10
+	statement:  SET DATA DATA.    (5)
+
+	.  reduce 5 (src line 21)
+
+
+8 terminals, 4 nonterminals
+7 grammar rules, 11/8000 states
+0 shift/reduce, 0 reduce/reduce conflicts reported
+53 working sets used
+memory: parser 3/120000
+0 extra closures
+8 shift entries, 1 exceptions
+4 goto entries
+0 entries saved by goto default
+Optimizer space used: output 12/120000
+12 table entries, 2 zero
+maximum spread: 8, maximum offset: 8

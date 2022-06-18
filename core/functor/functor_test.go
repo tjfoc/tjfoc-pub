@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// simple MapFunc
 func mapTest(a interface{}) interface{} {
 	v, ok := a.([]int)
 	if !ok {
@@ -19,6 +20,7 @@ func mapTest(a interface{}) interface{} {
 	return r
 }
 
+// simple FoldFunc
 func foldlTest(a interface{}, b interface{}) interface{} {
 	v, ok := a.([]int)
 	if !ok {

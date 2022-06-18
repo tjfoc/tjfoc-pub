@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package transaction;
+
+message TransactionHeader{
+    uint32 version = 1;
+    uint64 timestamp = 2;
+    bytes transactionHash = 3;
+    bytes transactionSign = 4;
+    bytes bigNum = 5;
+}
+
+message Transaction{
+    bytes smartContract = 1;
+    repeated bytes records = 2;
+    TransactionHeader header = 3;
+    repeated bytes smartContractArgs = 4;
+}

@@ -1,0 +1,38 @@
+set a int8 = (1+2)*3
+let aa [1][2][3][4]int8 = {{{{1,2,3,4},{5,6,7,8},{9,10,11,12}},{{1,2,3,4},{5,6,7,8},{9,10,11,12}}}}
+let bb [1][2][3][4]string = {{{{"aaa","aaa","aaa","aaa"},{"aa","aa","aa","aa"},{"aa","aa","aa","aa"}},{{"aa","aa","aa","aa"},{"aa","aa","aa","aa"},{"aa","aa","aa","aa"}}}}
+let cc [3][4]int8
+let dd [1][2][3][4]string
+set b int8 = 3
+let c int8 = 9
+let d int8 = 8
+let e int8 = 8
+let f int8 = 8
+let g int8 = 8
+cc = {{111,111,111,111},{5,6,7,8},{9,10,11,12}}
+dd = {{{{"aaa","aaa","aaa","aaa"},{"aa","aa","aa","aa"},{"aa","aa","aa","aa"}},{{"aa","aa","aa","aa"},{"aa","aa","aa","aa"},{"aa","aa","aa","aa"}}}}
+aa[0][0][0] = cc[0]
+aa[0][0][0][0] = 100
+if(a==10&&a==9){
+    if(1==1){
+        a=10
+    }
+    a=a+1
+    a=6+a
+    a = 7
+}else if(1==1){
+    a=6
+}else{
+    a=5
+}
+for(d = 8;d<10;d=d+1){
+    for(e = 8;e<10;e=e+1){
+        for(f = 8;f<10;f=f+1){
+            for(g = 8;g<10;g=g+1){
+                let b int8 = 1
+                a=a+b
+            }
+        }
+    }
+}
+a=aa[0][0][0][0]+3

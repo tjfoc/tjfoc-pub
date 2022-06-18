@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package peer;
+
+import "block.proto";
+import "transaction.proto";
+
+message BlockchainBool{
+    bool ok = 1;
+	string err = 2;
+}
+
+message BlockchainHash{
+    bytes hashData = 1;
+}
+
+message PeerInfo{
+    string id = 1;
+    string addr = 2;
+    int32 state = 3;
+}
+
+message PeerUpdateInfo{
+    int32 typ = 1;
+    string id = 2;
+    string addr = 3;
+    string data = 4;
+    string sign = 5;
+    string admin = 6;
+}
+
+message MemberListInfo{
+    repeated PeerInfo memberList = 1;
+}
+
+message BlockchainNumber{
+    uint64 number = 1;
+}
+
+message SearchMes{
+	repeated bytes key = 1;
+	uint32 type = 2;//0-单key完整查询 1-多key完整查询 2-前缀查询 3-范围查询（暂未实现）
+}
+
+message SearchRes{
+	map<string,string> res = 1;
+}
+
+service Peer{
+    rpc Search(SearchMes) returns(SearchRes){};
+    rpc NewTransaction(transaction.Transaction) returns(BlockchainBool){};
+
+    rpc BlockchainGetHeight(BlockchainBool) returns(BlockchainNumber){};
+
+    rpc BlockchainGetBlockByHash(BlockchainHash) returns(block.Block){};
+    rpc BlockchainGetBlockByHeight(BlockchainNumber) returns(block.Block){};
+
+    rpc BlockchainGetTransaction(BlockchainHash) returns(transaction.Transaction){};
+    rpc BlockchainGetTransactionIndex(BlockchainHash) returns(BlockchainNumber){};
+    rpc BlockchainGetTransactionBlock(BlockchainHash) returns(BlockchainNumber){};
+
+    rpc GetMemberList(BlockchainBool) returns(MemberListInfo){};
+
+    rpc UpdatePeer(PeerUpdateInfo) returns(BlockchainBool){};
+}

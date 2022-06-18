@@ -1,0 +1,63 @@
+func Float32ToByte(float float32) []byte {
+	bits := math.Float32bits(float)
+	bytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(bytes, bits)
+
+	return bytes
+}
+
+func Float64ToByte(float float64) []byte {
+	bits := math.Float64bits(float)
+	bytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(bytes, bits)
+
+	return bytes
+}
+
+func Int64ToBytes(i int64) []byte {
+	var buf = make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(i))
+	return buf
+}
+
+func Int32ToBytes(i int32) []byte {
+	var buf = make([]byte, 8)
+	binary.BigEndian.PutUint32(buf, uint32(i))
+	return buf
+}
+
+func Int16ToBytes(i int16) []byte {
+	var buf = make([]byte, 8)
+	binary.BigEndian.PutUint16(buf, uint16(i))
+	return buf
+}
+
+func Int8ToBytes(i int8) []byte {
+	var buf = make([]byte, 8)
+	binary.BigEndian.PutUint16(buf, uint16(i))
+	return buf
+}
+
+func Uint64ToBytes(i uint64) []byte {
+	var buf = make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, i)
+	return buf
+}
+
+func Uint32ToBytes(i uint32) []byte {
+	var buf = make([]byte, 8)
+	binary.BigEndian.PutUint32(buf, i)
+	return buf
+}
+
+func Uint16ToBytes(i uint16) []byte {
+	var buf = make([]byte, 8)
+	binary.BigEndian.PutUint16(buf, i)
+	return buf
+}
+
+func Uint8ToBytes(i uint8) []byte {
+	var buf = make([]byte, 8)
+	binary.BigEndian.PutUint16(buf, uint16(i))
+	return buf
+}
